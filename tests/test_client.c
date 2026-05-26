@@ -13,6 +13,10 @@ static void configure_instrument(gsc_position_manager_t *manager, const char *ve
     assert(gsc_instrument_manager_update(&manager->instruments, &instrument) == 0);
 }
 
+static double test_order_budget_cost(const gsc_order_t *order) {
+    return fabs(order->size_delta) + fmax(order->estimated_fee, 0.0);
+}
+
 static void test_parse_signal(void) {
     gsc_event_t event;
     int rc = gsc_parse_event("{\"type\":\"signal\",\"subscriptionId\":2,\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"replay\":true,\"signal\":{\"confidence\":0.8,\"side\":\"buy\",\"takeProfit\":0.01,\"stopLoss\":0.004}}", &event);
@@ -62,7 +66,8 @@ static void test_position_manager_flip(void) {
     assert(n == 1);
     assert(orders[0].side == GSC_SIDE_BUY);
     assert(strcmp(orders[0].reason, "opening") == 0);
-    assert(fabs(orders[0].target_size - 0.10) < 1e-9);
+    double buy_target = orders[0].target_size;
+    assert(fabs(test_order_budget_cost(&orders[0]) - 0.10) < 1e-9);
 
     gsc_signal_t sell = buy;
     sell.side = GSC_SIDE_SELL;
@@ -74,7 +79,7 @@ static void test_position_manager_flip(void) {
     assert(orders[0].side == GSC_SIDE_SELL);
     assert(strcmp(orders[0].reason, "flip") == 0);
     assert(fabs(orders[0].target_size) < 1e-9);
-    assert(fabs(orders[0].size_delta + 0.10) < 1e-9);
+    assert(fabs(orders[0].size_delta + buy_target) < 1e-9);
 
     n = gsc_position_manager_handle_signal(&manager, &sell, orders, GSC_MAX_ORDERS);
     assert(n == 1);
@@ -297,7 +302,7 @@ static void test_phases_reductions_before_openings(void) {
     assert(n == 1);
     assert(strcmp(orders[0].instrument, "BTC-USDT-SWAP") == 0);
     assert(orders[0].side == GSC_SIDE_SELL);
-    assert(fabs(orders[0].target_size - 0.10) < 1e-9);
+    assert(fabs(orders[0].target_size - (0.10 / (1.0 + orders[0].leverage * orders[0].fee_rate))) < 1e-9);
 
     n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
     assert(n == 1);
@@ -332,8 +337,8 @@ static void test_caps_openings_to_available_exposure(void) {
     gsc_order_t orders[GSC_MAX_ORDERS];
     size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
     assert(n == 1);
-    assert(fabs(orders[0].size_delta - 0.05) < 1e-9);
-    assert(fabs(orders[0].target_size - 0.05) < 1e-9);
+    assert(test_order_budget_cost(&orders[0]) <= 0.05 + 1e-9);
+    assert(orders[0].size_delta < 0.05);
 }
 
 int main(void) {

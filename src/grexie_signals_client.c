@@ -317,6 +317,21 @@ static double expected_edge(const gsc_signal_t *signal) {
     return clamp01(signal->confidence) * fmax(signal->take_profit, 0.0) - (1.0 - clamp01(signal->confidence)) * fmax(signal->stop_loss, 0.0);
 }
 
+typedef struct {
+    double margin;
+    double fee;
+} executable_allocation_t;
+
+static double fee_exposure_for_notional(double notional, double fee_rate, double equity) {
+    if (notional <= 0.0 || fee_rate <= 0.0 || equity <= 0.0) return 0.0;
+    return notional * fee_rate / equity;
+}
+
+static double fee_exposure_for_margin(double margin, double leverage, double fee_rate) {
+    if (margin <= 0.0 || leverage <= 0.0 || fee_rate <= 0.0) return 0.0;
+    return margin * leverage * fee_rate;
+}
+
 static double position_move(const gsc_position_t *position) {
     if (position->entry_price <= 0.0 || position->last_price <= 0.0) return 0.0;
     if (position->size < 0.0) return (position->entry_price - position->last_price) / position->entry_price;
@@ -340,7 +355,8 @@ static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delt
                 : price;
             position->last_price = price;
         }
-        double fee = fabs(delta) * fee_rate;
+        double leverage = position->leverage > 0.0 ? position->leverage : manager->config.min_leverage;
+        double fee = fee_exposure_for_margin(fabs(delta), leverage, fee_rate);
         position->fees += fee;
         position->realized_pnl -= fee;
         position->size += delta;
@@ -349,7 +365,8 @@ static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delt
     if (price > 0.0) position->last_price = price;
     double closing = fmin(fabs(position->size), fabs(delta));
     double gross = position_move(position) * closing;
-    double fee = closing * fee_rate;
+    double leverage = position->leverage > 0.0 ? position->leverage : manager->config.min_leverage;
+    double fee = fee_exposure_for_margin(closing, leverage, fee_rate);
     position->realized_gross += gross;
     position->fees += fee;
     position->realized_pnl += gross - fee;
@@ -364,7 +381,7 @@ static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delt
     position->last_price = price;
     position->confidence = 0.0;
     position->realized_gross = 0.0;
-    position->fees = remaining * fee_rate;
+    position->fees = fee_exposure_for_margin(remaining, leverage, fee_rate);
     position->realized_pnl = -position->fees;
 }
 
@@ -374,23 +391,28 @@ static void make_order(gsc_position_manager_t *manager, const char *key, const g
     double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
     double leverage = select_leverage(manager, key, confidence, edge, score);
     double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
-    double notional = fabs(delta) * equity * leverage;
+    double requested_abs_delta = fabs(delta);
+    double notional = requested_abs_delta * equity * leverage;
     double quantity = price > 0.0 ? round_down_to_step(notional / price, metadata.lot_size) : 0.0;
     notional = quantity * price;
+    double executable_abs_delta = requested_abs_delta;
+    if (equity > 0.0 && leverage > 0.0 && price > 0.0) executable_abs_delta = notional / (equity * leverage);
+    if (executable_abs_delta > requested_abs_delta) executable_abs_delta = requested_abs_delta;
+    double executable_delta = signum(delta) * executable_abs_delta;
     memset(order, 0, sizeof *order);
     copy_text(order->venue, sizeof order->venue, position->venue);
     copy_text(order->instrument, sizeof order->instrument, position->instrument);
     copy_text(order->reason, sizeof order->reason, reason);
     order->side = delta < 0.0 ? GSC_SIDE_SELL : GSC_SIDE_BUY;
-    order->size_delta = delta;
+    order->size_delta = executable_delta;
     order->previous_size = position->size;
-    order->target_size = position->size + delta;
+    order->target_size = position->size + executable_delta;
     order->price = price;
     order->confidence = confidence;
     order->score = score;
     order->expected_edge = edge;
     order->fee_rate = taker_fee_rate(manager, key);
-    order->estimated_fee = fabs(delta) * order->fee_rate;
+    order->estimated_fee = fee_exposure_for_notional(notional, order->fee_rate, equity);
     order->estimated_fee_value = notional * order->fee_rate;
     order->quantity = quantity;
     order->notional = notional;
@@ -402,10 +424,62 @@ static void make_order(gsc_position_manager_t *manager, const char *key, const g
 }
 
 static int order_meets_minimum(const gsc_order_t *order) {
+    if (order->quantity <= 0.0) return 0;
     if (strcmp(order->reason, "closing") == 0 || strcmp(order->reason, "flip") == 0) return 1;
     if (order->min_size > 0.0 && order->quantity > 0.0 && order->quantity < order->min_size) return 0;
-    if (order->min_size > 0.0 && order->quantity <= 0.0) return 0;
     return 1;
+}
+
+static double order_budget_cost(const gsc_order_t *order) {
+    return fabs(order->size_delta) + fmax(order->estimated_fee, 0.0);
+}
+
+static executable_allocation_t executable_allocation_for_budget(gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double budget, double confidence, double edge, double score) {
+    executable_allocation_t allocation = {0};
+    if (budget <= 1e-9) return allocation;
+    gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
+    const gsc_asset_t *asset = find_asset(&manager->assets, metadata.settlement_currency);
+    double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
+    double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
+    double leverage = select_leverage(manager, key, confidence > 0.0 ? confidence : position->confidence, edge, score);
+    if (price <= 0.0 || equity <= 0.0 || leverage <= 0.0) return allocation;
+    double fee_rate = taker_fee_rate(manager, key);
+    double fee_multiplier = fmax(1.0 + leverage * fee_rate, 1.0);
+    double max_margin = budget / fee_multiplier;
+    double quantity = round_down_to_step(max_margin * equity * leverage / price, metadata.lot_size);
+    if (quantity <= 1e-9) return allocation;
+    if (metadata.min_size > 0.0 && quantity < metadata.min_size) return allocation;
+    allocation.margin = quantity * price / (equity * leverage);
+    allocation.fee = quantity * price * fee_rate / equity;
+    if (allocation.margin + allocation.fee > budget + 1e-9) {
+        allocation.margin = 0.0;
+        allocation.fee = 0.0;
+    }
+    return allocation;
+}
+
+static executable_allocation_t executable_lot_step_cost(gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double confidence, double edge, double score) {
+    executable_allocation_t allocation = {0};
+    gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
+    if (metadata.lot_size <= 0.0) return allocation;
+    const gsc_asset_t *asset = find_asset(&manager->assets, metadata.settlement_currency);
+    double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
+    double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
+    double leverage = select_leverage(manager, key, confidence > 0.0 ? confidence : position->confidence, edge, score);
+    if (price <= 0.0 || equity <= 0.0 || leverage <= 0.0) return allocation;
+    allocation.margin = metadata.lot_size * price / (equity * leverage);
+    allocation.fee = metadata.lot_size * price * taker_fee_rate(manager, key) / equity;
+    return allocation;
+}
+
+static double cap_opening_delta_to_budget(gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double delta, double confidence, double edge, double score, double budget) {
+    if (fabs(delta) <= 1e-9 || budget <= 1e-9) return 0.0;
+    executable_allocation_t executable = executable_allocation_for_budget(manager, key, position, budget, confidence, edge, score);
+    if (executable.margin <= 1e-9) return 0.0;
+    if (executable.margin < fabs(delta)) return signum(delta) * executable.margin;
+    gsc_order_t order;
+    make_order(manager, key, position, delta, edge, score, "budget-check", confidence, &order);
+    return order_budget_cost(&order) > budget + 1e-9 ? signum(delta) * executable.margin : delta;
 }
 
 typedef struct {
@@ -459,7 +533,12 @@ static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_
                 if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
                 continue;
             }
-            if (fabs(delta) > available) delta = signum(delta) * available;
+            delta = cap_opening_delta_to_budget(manager, candidates[i].key, &candidates[i].position, delta, candidates[i].weight, candidates[i].edge, candidates[i].score, available);
+            if (fabs(delta) <= 1e-9) {
+                size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
+                if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
+                continue;
+            }
         }
         make_order(manager, candidates[i].key, &candidates[i].position, delta, candidates[i].edge, candidates[i].score, candidates[i].reason, candidates[i].weight, &orders[order_count]);
         orders[order_count].take_profit = candidates[i].take_profit;
@@ -470,12 +549,12 @@ static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_
             continue;
         }
         if (cap_openings && !is_exposure_reduction(orders[order_count].previous_size, orders[order_count].target_size)) {
-            add_currency_used(usage, &usage_count, orders[order_count].settlement_currency, fabs(orders[order_count].size_delta));
+            add_currency_used(usage, &usage_count, orders[order_count].settlement_currency, order_budget_cost(&orders[order_count]));
         }
         order_count++;
         size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
         if (current_idx == (size_t)-1) continue;
-        apply_delta(manager, current_idx, delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key));
+        apply_delta(manager, current_idx, orders[order_count - 1].size_delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key));
         current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
         if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
     }
@@ -492,7 +571,7 @@ size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, cons
     key_for(key, sizeof key, venue, instrument);
     make_order(manager, key, &position, -position.size, 0.0, 0.0, "closing", position.confidence, &orders[0]);
     if (!order_meets_minimum(&orders[0])) return 0;
-    apply_delta(manager, idx, -position.size, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key));
+    apply_delta(manager, idx, orders[0].size_delta, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key));
     return 1;
 }
 
@@ -511,7 +590,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     if (target_sign == 0.0 || target_confidence <= 0.0) return 0;
     double edge = expected_edge(signal) - 2.0 * taker_fee_rate(manager, key);
     if (manager->config.min_expected_edge > 0.0 && edge < manager->config.min_expected_edge) return 0;
-    double target_size = target_sign * manager->config.position_size * target_confidence;
+    double target_size = target_sign * manager->config.position_size;
     double min_delta = manager->config.min_order_delta * manager->config.position_size;
     size_t idx = find_position(manager, signal->venue, signal->instrument);
     if (idx == (size_t)-1 || fabs(manager->positions[idx].size) <= 1e-9) {
@@ -540,22 +619,91 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     manager->positions[idx].stop_loss = signal->stop_loss;
     manager->positions[idx].leverage = select_leverage(manager, key, target_confidence, edge, signal->score);
 
-    double total_weight = 0.0;
     double weights[GSC_MAX_POSITIONS];
     double sides[GSC_MAX_POSITIONS];
+    double edges[GSC_MAX_POSITIONS];
+    double scores[GSC_MAX_POSITIONS];
+    int active[GSC_MAX_POSITIONS];
+    double targets[GSC_MAX_POSITIONS];
     for (size_t i = 0; i < manager->position_count; i++) {
         weights[i] = clamp01(manager->positions[i].confidence);
         sides[i] = signum(manager->positions[i].size);
         if (i == idx) sides[i] = target_sign;
-        if (weights[i] > 1e-9 && sides[i] != 0.0) total_weight += weights[i];
+        edges[i] = i == idx ? edge : 0.0;
+        scores[i] = i == idx ? signal->score : 0.0;
+        active[i] = weights[i] > 1e-9 && sides[i] != 0.0;
+        targets[i] = 0.0;
     }
-    double used_budget = manager->config.position_size < total_weight ? manager->config.position_size : total_weight;
+    for (;;) {
+        double total_weight = 0.0;
+        for (size_t i = 0; i < manager->position_count; i++) if (active[i]) total_weight += weights[i];
+        if (total_weight <= 1e-9) break;
+        size_t drop_idx = (size_t)-1;
+        double drop_weight = HUGE_VAL;
+        for (size_t i = 0; i < manager->position_count; i++) {
+            if (!active[i]) continue;
+            char position_key[GSC_MAX_TEXT * 2];
+            key_for(position_key, sizeof position_key, manager->positions[i].venue, manager->positions[i].instrument);
+            double desired_budget = manager->config.position_size * weights[i] / total_weight;
+            executable_allocation_t executable = executable_allocation_for_budget(manager, position_key, &manager->positions[i], desired_budget, weights[i], edges[i], scores[i]);
+            if (executable.margin > 1e-9) continue;
+            if (weights[i] < drop_weight) {
+                drop_idx = i;
+                drop_weight = weights[i];
+            }
+        }
+        if (drop_idx == (size_t)-1) break;
+        active[drop_idx] = 0;
+    }
+    double active_weight = 0.0;
+    for (size_t i = 0; i < manager->position_count; i++) if (active[i]) active_weight += weights[i];
+    double allocated = 0.0;
+    if (active_weight > 1e-9) {
+        for (size_t i = 0; i < manager->position_count; i++) {
+            if (!active[i]) continue;
+            char position_key[GSC_MAX_TEXT * 2];
+            key_for(position_key, sizeof position_key, manager->positions[i].venue, manager->positions[i].instrument);
+            double desired_budget = manager->config.position_size * weights[i] / active_weight;
+            executable_allocation_t executable = executable_allocation_for_budget(manager, position_key, &manager->positions[i], desired_budget, weights[i], edges[i], scores[i]);
+            if (executable.margin <= 1e-9) continue;
+            targets[i] = sides[i] * executable.margin;
+            allocated += executable.margin + executable.fee;
+        }
+    }
+    double free_budget = manager->config.position_size - allocated;
+    int processed[GSC_MAX_POSITIONS];
+    memset(processed, 0, sizeof processed);
+    while (free_budget > 1e-9) {
+        size_t best_idx = (size_t)-1;
+        double best_weight = -1.0;
+        for (size_t i = 0; i < manager->position_count; i++) {
+            if (!active[i] || processed[i]) continue;
+            if (weights[i] > best_weight) {
+                best_idx = i;
+                best_weight = weights[i];
+            }
+        }
+        if (best_idx == (size_t)-1) break;
+        processed[best_idx] = 1;
+        char position_key[GSC_MAX_TEXT * 2];
+        key_for(position_key, sizeof position_key, manager->positions[best_idx].venue, manager->positions[best_idx].instrument);
+        executable_allocation_t step = executable_lot_step_cost(manager, position_key, &manager->positions[best_idx], weights[best_idx], edges[best_idx], scores[best_idx]);
+        double step_cost = step.margin + step.fee;
+        if (step_cost <= 1e-9) {
+            targets[best_idx] += sides[best_idx] * free_budget;
+            break;
+        }
+        double steps = floor((free_budget + 1e-9) / step_cost);
+        if (steps <= 0.0) continue;
+        targets[best_idx] += sides[best_idx] * steps * step.margin;
+        free_budget -= steps * step_cost;
+    }
     rebalance_candidate_t reductions[GSC_MAX_ORDERS];
     rebalance_candidate_t openings[GSC_MAX_ORDERS];
     size_t reduction_count = 0;
     size_t opening_count = 0;
     for (size_t i = 0; i < manager->position_count; i++) {
-        double target = total_weight > 0.0 ? sides[i] * used_budget * weights[i] / total_weight : 0.0;
+        double target = targets[i];
         double delta = target - manager->positions[i].size;
         int is_flip = is_flip_target(manager->positions[i].size, target);
         if (is_flip) delta = -manager->positions[i].size;
