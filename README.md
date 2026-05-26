@@ -1,0 +1,62 @@
+# Grexie Signals C Client
+
+C99 client library for Grexie Signals websocket protocol events and production-style in-memory position management.
+
+The C package intentionally keeps the transport pluggable: applications can connect with libwebsockets, curl, or an exchange gateway, then provide `gsc_send_fn` and `gsc_recv_fn` callbacks to `gsc_client_t`. The library owns subscription JSON, typed event parsing, and position-manager behavior.
+
+## Build
+
+```sh
+make
+make test
+```
+
+## Websocket Client
+
+```c
+#include <grexie_signals_client.h>
+
+gsc_client_t client;
+gsc_client_init(&client, "ws_your_token", send_text, recv_text, transport);
+gsc_client_subscribe(&client, "okx", "BTC-USDT-SWAP");
+
+gsc_event_t event;
+if (gsc_client_receive(&client, &event) == 0 && event.type == GSC_EVENT_SIGNAL) {
+    printf("%s %d %.2f\n", event.signal.instrument, event.signal.side, event.signal.confidence);
+}
+```
+
+## Position Manager
+
+```c
+gsc_position_manager_config_t config = gsc_production_position_manager_config();
+config.position_size = 0.10;
+config.max_leverage = 3.0;
+
+gsc_position_manager_t manager;
+gsc_position_manager_init(&manager, config);
+
+gsc_signal_t signal = {0};
+snprintf(signal.venue, sizeof signal.venue, "okx");
+snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
+signal.side = GSC_SIDE_BUY;
+signal.confidence = 0.82;
+signal.take_profit = 0.012;
+signal.stop_loss = 0.004;
+signal.price = 68000.0;
+
+gsc_order_t orders[GSC_MAX_ORDERS];
+size_t count = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+```
+
+The manager mirrors production sizing: shared portfolio budget, confidence-weighted rebalance, `min_order_delta` scaled by `position_size`, flip-safe opposite-side handling, fee-aware realized PnL, and leverage selected from confidence, fee-adjusted edge, and score.
+
+## Assets, Instruments, And Stats
+
+Use `gsc_asset_manager_update` for cash, available balance, used margin, and equity. Use `gsc_instrument_manager_update` for settlement currency, lot size, minimum size, tick size, and exchange max leverage. Orders include concrete quantity, notional, settlement currency, and fee-value estimates.
+
+Call `gsc_position_manager_stats` for realized and unrealized PnL in account value and percent.
+
+## Packaging
+
+The stable public header is `include/grexie_signals_client.h`; the static library target is `libgrexie_signals_client.a`.
