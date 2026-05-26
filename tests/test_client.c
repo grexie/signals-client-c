@@ -73,7 +73,13 @@ static void test_position_manager_flip(void) {
     assert(n == 1);
     assert(orders[0].side == GSC_SIDE_SELL);
     assert(strcmp(orders[0].reason, "flip") == 0);
-    assert(orders[0].size_delta < -0.19);
+    assert(fabs(orders[0].target_size) < 1e-9);
+    assert(fabs(orders[0].size_delta + 0.10) < 1e-9);
+
+    n = gsc_position_manager_handle_signal(&manager, &sell, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(orders[0].side == GSC_SIDE_SELL);
+    assert(strcmp(orders[0].reason, "opening") == 0);
 }
 
 static void test_ignores_unconfigured_signals(void) {
@@ -252,6 +258,84 @@ static void test_rejects_below_min_size(void) {
     assert(n == 0);
 }
 
+static void test_phases_reductions_before_openings(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.position_size = 0.20;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+
+    gsc_asset_t asset = {0};
+    snprintf(asset.currency, sizeof asset.currency, "USDT");
+    asset.cash = 1000.0;
+    asset.available = 1000.0;
+    asset.equity = 1000.0;
+    assert(gsc_asset_manager_update(&manager.assets, &asset) == 0);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+    configure_instrument(&manager, "okx", "ETH-USDT-SWAP");
+
+    gsc_position_t position = {0};
+    snprintf(position.venue, sizeof position.venue, "okx");
+    snprintf(position.instrument, sizeof position.instrument, "BTC-USDT-SWAP");
+    position.size = 0.15;
+    position.confidence = 1.0;
+    position.entry_price = 100.0;
+    position.last_price = 100.0;
+    assert(gsc_position_manager_add_position(&manager, &position) == 0);
+
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "ETH-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.02;
+    signal.stop_loss = 0.004;
+    signal.price = 100.0;
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(strcmp(orders[0].instrument, "BTC-USDT-SWAP") == 0);
+    assert(orders[0].side == GSC_SIDE_SELL);
+    assert(fabs(orders[0].target_size - 0.10) < 1e-9);
+
+    n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(strcmp(orders[0].instrument, "ETH-USDT-SWAP") == 0);
+    assert(orders[0].side == GSC_SIDE_BUY);
+}
+
+static void test_caps_openings_to_available_exposure(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.position_size = 0.20;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+
+    gsc_asset_t asset = {0};
+    snprintf(asset.currency, sizeof asset.currency, "USDT");
+    asset.cash = 1000.0;
+    asset.available = 50.0;
+    asset.equity = 1000.0;
+    assert(gsc_asset_manager_update(&manager.assets, &asset) == 0);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.02;
+    signal.stop_loss = 0.004;
+    signal.price = 100.0;
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(fabs(orders[0].size_delta - 0.05) < 1e-9);
+    assert(fabs(orders[0].target_size - 0.05) < 1e-9);
+}
+
 int main(void) {
     test_parse_signal();
     test_parse_info_and_error();
@@ -261,6 +345,8 @@ int main(void) {
     test_leverage_adapts_with_confidence_edge_and_score();
     test_asset_instrument_order_and_stats();
     test_rejects_below_min_size();
+    test_phases_reductions_before_openings();
+    test_caps_openings_to_available_exposure();
     puts("ok");
     return 0;
 }

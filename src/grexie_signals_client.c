@@ -17,6 +17,21 @@ static double signum(double value) {
     return 0.0;
 }
 
+static int same_sign(double a, double b) {
+    return signum(a) == signum(b);
+}
+
+static int is_flip_target(double previous_size, double target_size) {
+    return fabs(previous_size) > 1e-9 && fabs(target_size) > 1e-9 && !same_sign(previous_size, target_size);
+}
+
+static int is_exposure_reduction(double previous_size, double target_size) {
+    if (fabs(previous_size) <= 1e-9) return 0;
+    if (fabs(target_size) <= 1e-9) return 1;
+    if (!same_sign(previous_size, target_size)) return 1;
+    return fabs(target_size) < fabs(previous_size) - 1e-9;
+}
+
 static void copy_text(char *dst, size_t dst_len, const char *src) {
     if (!dst || dst_len == 0) return;
     if (!src) src = "";
@@ -212,6 +227,15 @@ static const gsc_asset_t *find_asset(const gsc_asset_manager_t *manager, const c
     return NULL;
 }
 
+static double available_exposure_budget(const gsc_position_manager_t *manager, const char *currency) {
+    const gsc_asset_t *asset = find_asset(&manager->assets, currency);
+    if (!asset) return HUGE_VAL;
+    double equity = asset->equity > 0.0 ? asset->equity : asset->cash + asset->used > 0.0 ? asset->cash + asset->used : asset->cash;
+    if (equity <= 0.0) return asset->available > 0.0 ? HUGE_VAL : 0.0;
+    if (asset->available <= 0.0) return 0.0;
+    return fmax(0.0, asset->available / equity);
+}
+
 static gsc_instrument_metadata_t instrument_metadata(const gsc_position_manager_t *manager, const char *venue, const char *instrument) {
     for (size_t i = 0; i < manager->instruments.instrument_count; i++) {
         if (strcmp(manager->instruments.instruments[i].venue, venue) == 0 && strcmp(manager->instruments.instruments[i].instrument, instrument) == 0) {
@@ -384,6 +408,80 @@ static int order_meets_minimum(const gsc_order_t *order) {
     return 1;
 }
 
+typedef struct {
+    char key[GSC_MAX_TEXT * 2];
+    gsc_position_t position;
+    double delta;
+    double weight;
+    double edge;
+    double score;
+    double take_profit;
+    double stop_loss;
+    char reason[32];
+} rebalance_candidate_t;
+
+typedef struct {
+    char currency[GSC_MAX_TEXT];
+    double used;
+} currency_usage_t;
+
+static double currency_used(currency_usage_t *usage, size_t usage_count, const char *currency) {
+    for (size_t i = 0; i < usage_count; i++) {
+        if (strcmp(usage[i].currency, currency) == 0) return usage[i].used;
+    }
+    return 0.0;
+}
+
+static void add_currency_used(currency_usage_t *usage, size_t *usage_count, const char *currency, double amount) {
+    for (size_t i = 0; i < *usage_count; i++) {
+        if (strcmp(usage[i].currency, currency) == 0) {
+            usage[i].used += amount;
+            return;
+        }
+    }
+    if (*usage_count >= 32) return;
+    copy_text(usage[*usage_count].currency, sizeof usage[*usage_count].currency, currency);
+    usage[*usage_count].used = amount;
+    (*usage_count)++;
+}
+
+static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_candidate_t *candidates, size_t candidate_count, int cap_openings, gsc_order_t *orders, size_t max_orders) {
+    currency_usage_t usage[32];
+    size_t usage_count = 0;
+    size_t order_count = 0;
+    for (size_t i = 0; i < candidate_count && order_count < max_orders; i++) {
+        double delta = candidates[i].delta;
+        if (cap_openings && !is_exposure_reduction(candidates[i].position.size, candidates[i].position.size + delta)) {
+            gsc_instrument_metadata_t metadata = instrument_metadata(manager, candidates[i].position.venue, candidates[i].position.instrument);
+            double available = available_exposure_budget(manager, metadata.settlement_currency) - currency_used(usage, usage_count, metadata.settlement_currency);
+            if (available <= 1e-9) {
+                size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
+                if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
+                continue;
+            }
+            if (fabs(delta) > available) delta = signum(delta) * available;
+        }
+        make_order(manager, candidates[i].key, &candidates[i].position, delta, candidates[i].edge, candidates[i].score, candidates[i].reason, candidates[i].weight, &orders[order_count]);
+        orders[order_count].take_profit = candidates[i].take_profit;
+        orders[order_count].stop_loss = candidates[i].stop_loss;
+        if (!order_meets_minimum(&orders[order_count])) {
+            size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
+            if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
+            continue;
+        }
+        if (cap_openings && !is_exposure_reduction(orders[order_count].previous_size, orders[order_count].target_size)) {
+            add_currency_used(usage, &usage_count, orders[order_count].settlement_currency, fabs(orders[order_count].size_delta));
+        }
+        order_count++;
+        size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
+        if (current_idx == (size_t)-1) continue;
+        apply_delta(manager, current_idx, delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key));
+        current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
+        if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
+    }
+    return order_count;
+}
+
 size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, const char *venue, const char *instrument, gsc_order_t *orders, size_t max_orders) {
     if (max_orders == 0) return 0;
     size_t idx = find_position(manager, venue, instrument);
@@ -416,15 +514,18 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     double target_size = target_sign * manager->config.position_size * target_confidence;
     double min_delta = manager->config.min_order_delta * manager->config.position_size;
     size_t idx = find_position(manager, signal->venue, signal->instrument);
-    if (idx == (size_t)-1) {
-        if (fabs(target_size) < min_delta || manager->position_count >= GSC_MAX_POSITIONS) return 0;
-        idx = manager->position_count++;
-        memset(&manager->positions[idx], 0, sizeof manager->positions[idx]);
-        copy_text(manager->positions[idx].venue, sizeof manager->positions[idx].venue, signal->venue);
-        copy_text(manager->positions[idx].instrument, sizeof manager->positions[idx].instrument, signal->instrument);
-        manager->positions[idx].entry_price = signal->price;
-        manager->positions[idx].last_price = signal->price;
-        manager->positions[idx].opened_at = time(NULL);
+    if (idx == (size_t)-1 || fabs(manager->positions[idx].size) <= 1e-9) {
+        if (fabs(target_size) < min_delta) return 0;
+        if (idx == (size_t)-1) {
+            if (manager->position_count >= GSC_MAX_POSITIONS) return 0;
+            idx = manager->position_count++;
+            memset(&manager->positions[idx], 0, sizeof manager->positions[idx]);
+            copy_text(manager->positions[idx].venue, sizeof manager->positions[idx].venue, signal->venue);
+            copy_text(manager->positions[idx].instrument, sizeof manager->positions[idx].instrument, signal->instrument);
+            manager->positions[idx].entry_price = signal->price;
+            manager->positions[idx].last_price = signal->price;
+            manager->positions[idx].opened_at = time(NULL);
+        }
     } else {
         double is_flip = signum(manager->positions[idx].size) != 0.0 && signum(manager->positions[idx].size) != target_sign;
         if (!is_flip && min_delta > 0.0 && fabs(target_size - manager->positions[idx].size) < min_delta) return 0;
@@ -449,26 +550,47 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         if (weights[i] > 1e-9 && sides[i] != 0.0) total_weight += weights[i];
     }
     double used_budget = manager->config.position_size < total_weight ? manager->config.position_size : total_weight;
-    size_t order_count = 0;
-    for (size_t i = 0; i < manager->position_count && order_count < max_orders; i++) {
+    rebalance_candidate_t reductions[GSC_MAX_ORDERS];
+    rebalance_candidate_t openings[GSC_MAX_ORDERS];
+    size_t reduction_count = 0;
+    size_t opening_count = 0;
+    for (size_t i = 0; i < manager->position_count; i++) {
         double target = total_weight > 0.0 ? sides[i] * used_budget * weights[i] / total_weight : 0.0;
         double delta = target - manager->positions[i].size;
-        if (fabs(delta) <= 1e-9) continue;
-        int is_flip = fabs(manager->positions[i].size) > 1e-9 && fabs(target) > 1e-9 && signum(manager->positions[i].size) != signum(target);
-        int is_opening = fabs(manager->positions[i].size) <= 1e-9 && fabs(target) > 1e-9;
-        int is_closing = fabs(target) <= 1e-9 && fabs(manager->positions[i].size) > 1e-9;
-        if (!(is_flip || is_opening || is_closing) && fabs(delta) < min_delta) continue;
-        const char *reason = is_opening ? "opening" : is_flip ? "flip" : is_closing ? "closing" : "rebalance";
-        make_order(manager, key, &manager->positions[i], delta, i == idx ? edge : 0.0, i == idx ? signal->score : 0.0, reason, weights[i], &orders[order_count]);
-        if (!order_meets_minimum(&orders[order_count])) {
+        int is_flip = is_flip_target(manager->positions[i].size, target);
+        if (is_flip) delta = -manager->positions[i].size;
+        if (fabs(delta) <= 1e-9) {
+            manager->positions[i].confidence = weights[i];
             continue;
         }
-        orders[order_count].take_profit = i == idx ? signal->take_profit : 0.0;
-        orders[order_count].stop_loss = i == idx ? signal->stop_loss : 0.0;
-        order_count++;
-        apply_delta(manager, i, delta, manager->positions[i].last_price > 0.0 ? manager->positions[i].last_price : manager->positions[i].entry_price, taker_fee_rate(manager, key));
+        int is_opening = fabs(manager->positions[i].size) <= 1e-9 && fabs(target) > 1e-9;
+        int is_closing = fabs(target) <= 1e-9 && fabs(manager->positions[i].size) > 1e-9;
+        if (!(is_flip || is_opening || is_closing) && fabs(delta) < min_delta) {
+            manager->positions[i].confidence = weights[i];
+            continue;
+        }
+        const char *reason = is_opening ? "opening" : is_flip ? "flip" : is_closing ? "closing" : "rebalance";
+        rebalance_candidate_t candidate;
+        memset(&candidate, 0, sizeof candidate);
+        key_for(candidate.key, sizeof candidate.key, manager->positions[i].venue, manager->positions[i].instrument);
+        candidate.position = manager->positions[i];
+        candidate.delta = delta;
+        candidate.weight = weights[i];
+        candidate.edge = i == idx ? edge : 0.0;
+        candidate.score = i == idx ? signal->score : 0.0;
+        candidate.take_profit = i == idx ? signal->take_profit : 0.0;
+        candidate.stop_loss = i == idx ? signal->stop_loss : 0.0;
+        copy_text(candidate.reason, sizeof candidate.reason, reason);
+        if (is_exposure_reduction(manager->positions[i].size, manager->positions[i].size + delta)) {
+            if (reduction_count < GSC_MAX_ORDERS) reductions[reduction_count++] = candidate;
+        } else {
+            if (opening_count < GSC_MAX_ORDERS) openings[opening_count++] = candidate;
+        }
     }
-    return order_count;
+    if (reduction_count > 0) {
+        return materialize_candidates(manager, reductions, reduction_count, 0, orders, max_orders);
+    }
+    return materialize_candidates(manager, openings, opening_count, 1, orders, max_orders);
 }
 
 gsc_position_stats_t gsc_position_manager_stats(const gsc_position_manager_t *manager) {

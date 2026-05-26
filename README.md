@@ -55,7 +55,7 @@ gsc_order_t orders[GSC_MAX_ORDERS];
 size_t count = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
 ```
 
-The manager mirrors production sizing: shared portfolio budget, confidence-weighted rebalance, `min_order_delta` scaled by `position_size`, flip-safe opposite-side handling, fee-aware realized PnL, and leverage selected from confidence, fee-adjusted edge, and score.
+The manager mirrors production sizing: shared portfolio budget, confidence-weighted rebalance, reductions/closes/first-phase flips before openings or increases, live asset available-exposure caps for openings, `min_order_delta` scaled by `position_size`, flip-safe opposite-side handling, fee-aware realized PnL, and leverage selected from confidence, fee-adjusted edge, and score.
 
 `gsc_position_manager_handle_event` ignores replay signal events, and both event and signal handlers ignore live signals whose venue/instrument pair has not been configured in the manager's instrument manager.
 
