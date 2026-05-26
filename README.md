@@ -36,6 +36,12 @@ config.max_leverage = 3.0;
 gsc_position_manager_t manager;
 gsc_position_manager_init(&manager, config);
 
+gsc_instrument_metadata_t instrument = {0};
+snprintf(instrument.venue, sizeof instrument.venue, "okx");
+snprintf(instrument.instrument, sizeof instrument.instrument, "BTC-USDT-SWAP");
+snprintf(instrument.settlement_currency, sizeof instrument.settlement_currency, "USDT");
+gsc_instrument_manager_update(&manager.instruments, &instrument);
+
 gsc_signal_t signal = {0};
 snprintf(signal.venue, sizeof signal.venue, "okx");
 snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
@@ -50,6 +56,8 @@ size_t count = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC
 ```
 
 The manager mirrors production sizing: shared portfolio budget, confidence-weighted rebalance, `min_order_delta` scaled by `position_size`, flip-safe opposite-side handling, fee-aware realized PnL, and leverage selected from confidence, fee-adjusted edge, and score.
+
+`gsc_position_manager_handle_event` ignores replay signal events, and both event and signal handlers ignore live signals whose venue/instrument pair has not been configured in the manager's instrument manager.
 
 ## Assets, Instruments, And Stats
 

@@ -189,6 +189,7 @@ int gsc_asset_manager_update(gsc_asset_manager_t *manager, const gsc_asset_t *as
 int gsc_instrument_manager_update(gsc_instrument_manager_t *manager, const gsc_instrument_metadata_t *instrument);
 int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position);
 int gsc_position_manager_update_position(gsc_position_manager_t *manager, const gsc_position_t *position);
+size_t gsc_position_manager_handle_event(gsc_position_manager_t *manager, const gsc_event_t *event, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const gsc_signal_t *signal, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, const char *venue, const char *instrument, gsc_order_t *orders, size_t max_orders);
 gsc_position_stats_t gsc_position_manager_stats(const gsc_position_manager_t *manager);

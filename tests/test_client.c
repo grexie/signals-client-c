@@ -5,6 +5,14 @@
 #include <stdio.h>
 #include <string.h>
 
+static void configure_instrument(gsc_position_manager_t *manager, const char *venue, const char *instrument_name) {
+    gsc_instrument_metadata_t instrument = {0};
+    snprintf(instrument.venue, sizeof instrument.venue, "%s", venue);
+    snprintf(instrument.instrument, sizeof instrument.instrument, "%s", instrument_name);
+    snprintf(instrument.settlement_currency, sizeof instrument.settlement_currency, "USDT");
+    assert(gsc_instrument_manager_update(&manager->instruments, &instrument) == 0);
+}
+
 static void test_parse_signal(void) {
     gsc_event_t event;
     int rc = gsc_parse_event("{\"type\":\"signal\",\"subscriptionId\":2,\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"replay\":true,\"signal\":{\"confidence\":0.8,\"side\":\"buy\",\"takeProfit\":0.01,\"stopLoss\":0.004}}", &event);
@@ -39,6 +47,7 @@ static void test_position_manager_flip(void) {
     config.max_leverage = 5.0;
     gsc_position_manager_t manager;
     gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
     gsc_order_t orders[GSC_MAX_ORDERS];
     gsc_signal_t buy = {0};
     snprintf(buy.venue, sizeof buy.venue, "okx");
@@ -65,6 +74,97 @@ static void test_position_manager_flip(void) {
     assert(orders[0].side == GSC_SIDE_SELL);
     assert(strcmp(orders[0].reason, "flip") == 0);
     assert(orders[0].size_delta < -0.19);
+}
+
+static void test_ignores_unconfigured_signals(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.position_size = 0.10;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "SOL-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.02;
+    signal.stop_loss = 0.004;
+    signal.price = 100.0;
+
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+    assert(manager.position_count == 0);
+
+    configure_instrument(&manager, "okx", "SOL-USDT-SWAP");
+    n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+}
+
+static void test_ignores_replay_events(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.position_size = 0.10;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    gsc_event_t event = {0};
+    event.type = GSC_EVENT_SIGNAL;
+    event.subscription_id = 3;
+    event.replay = 1;
+    snprintf(event.signal.venue, sizeof event.signal.venue, "okx");
+    snprintf(event.signal.instrument, sizeof event.signal.instrument, "BTC-USDT-SWAP");
+    event.signal.side = GSC_SIDE_BUY;
+    event.signal.confidence = 1.0;
+    event.signal.take_profit = 0.02;
+    event.signal.stop_loss = 0.004;
+    event.signal.price = 100.0;
+
+    size_t n = gsc_position_manager_handle_event(&manager, &event, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+    assert(manager.position_count == 0);
+
+    event.replay = 0;
+    n = gsc_position_manager_handle_event(&manager, &event, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+}
+
+static double leverage_for(const char *instrument_name, double confidence, double take_profit, double score) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.position_size = 1.0;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    config.min_leverage = 1.0;
+    config.max_leverage = 5.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", instrument_name);
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "%s", instrument_name);
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = confidence;
+    signal.take_profit = take_profit;
+    signal.stop_loss = 0.0;
+    signal.score = score;
+    signal.price = 100.0;
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    return orders[0].leverage;
+}
+
+static void test_leverage_adapts_with_confidence_edge_and_score(void) {
+    double low = leverage_for("LOW-USDT-SWAP", 0.2, 0.0, 0.0);
+    double scored = leverage_for("SCORE-USDT-SWAP", 0.2, 0.0, 1.0);
+    double high = leverage_for("HIGH-USDT-SWAP", 1.0, 0.02, 1.0);
+    assert(low >= 1.0);
+    assert(high <= 5.0);
+    assert(scored > low);
+    assert(fabs(high - 5.0) < 1e-9);
 }
 
 static void test_asset_instrument_order_and_stats(void) {
@@ -156,6 +256,9 @@ int main(void) {
     test_parse_signal();
     test_parse_info_and_error();
     test_position_manager_flip();
+    test_ignores_unconfigured_signals();
+    test_ignores_replay_events();
+    test_leverage_adapts_with_confidence_edge_and_score();
     test_asset_instrument_order_and_stats();
     test_rejects_below_min_size();
     puts("ok");

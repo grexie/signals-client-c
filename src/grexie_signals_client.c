@@ -226,6 +226,14 @@ static gsc_instrument_metadata_t instrument_metadata(const gsc_position_manager_
     return metadata;
 }
 
+static int instrument_configured(const gsc_position_manager_t *manager, const char *venue, const char *instrument) {
+    if (!manager || !venue || !instrument || venue[0] == '\0' || instrument[0] == '\0') return 0;
+    for (size_t i = 0; i < manager->instruments.instrument_count; i++) {
+        if (strcmp(manager->instruments.instruments[i].venue, venue) == 0 && strcmp(manager->instruments.instruments[i].instrument, instrument) == 0) return 1;
+    }
+    return 0;
+}
+
 static size_t find_position(gsc_position_manager_t *manager, const char *venue, const char *instrument) {
     for (size_t i = 0; i < manager->position_count; i++) {
         if (strcmp(manager->positions[i].venue, venue) == 0 && strcmp(manager->positions[i].instrument, instrument) == 0) return i;
@@ -390,8 +398,14 @@ size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, cons
     return 1;
 }
 
+size_t gsc_position_manager_handle_event(gsc_position_manager_t *manager, const gsc_event_t *event, gsc_order_t *orders, size_t max_orders) {
+    if (!manager || !event || event->type != GSC_EVENT_SIGNAL || event->replay) return 0;
+    return gsc_position_manager_handle_signal(manager, &event->signal, orders, max_orders);
+}
+
 size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const gsc_signal_t *signal, gsc_order_t *orders, size_t max_orders) {
     if (max_orders == 0 || !manager || !signal) return 0;
+    if (!instrument_configured(manager, signal->venue, signal->instrument)) return 0;
     char key[GSC_MAX_TEXT * 2];
     key_for(key, sizeof key, signal->venue, signal->instrument);
     double target_sign = (double)signal->side;
