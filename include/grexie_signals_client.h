@@ -31,11 +31,32 @@ typedef enum {
 typedef struct {
     char venue[GSC_MAX_TEXT];
     char instrument[GSC_MAX_TEXT];
+    char timeframe[GSC_MAX_TEXT];
     double confidence;
     gsc_side_t side;
     double take_profit;
     double stop_loss;
     double score;
+    char model_variant[GSC_MAX_TEXT];
+    char model_version[GSC_MAX_TEXT];
+    char prediction_mode[GSC_MAX_TEXT];
+    char confidence_mapping[GSC_MAX_TEXT];
+    double up_probability;
+    double down_probability;
+    double directional_edge;
+    double normalized_edge;
+    double expected_value;
+    char regime[GSC_MAX_TEXT];
+    double regime_confidence;
+    char volatility_state[GSC_MAX_TEXT];
+    char squeeze_state[GSC_MAX_TEXT];
+    char trend_state[GSC_MAX_TEXT];
+    double atr_percent;
+    double signal_ttl;
+    char generated_at[GSC_MAX_TEXT];
+    char artifact_id[GSC_MAX_TEXT];
+    char artifact_version[GSC_MAX_TEXT];
+    char rejected_reason[GSC_MAX_TEXT];
     double price;
 } gsc_signal_t;
 
@@ -154,6 +175,7 @@ typedef struct {
     double leverage;
     double take_profit;
     double stop_loss;
+    int reduce_only;
 } gsc_order_t;
 
 typedef struct {

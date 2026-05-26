@@ -156,10 +156,31 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
         event->type = GSC_EVENT_SIGNAL;
         copy_text(event->signal.venue, sizeof event->signal.venue, event->venue);
         copy_text(event->signal.instrument, sizeof event->signal.instrument, event->instrument);
+        json_get_string(json, "timeframe", event->signal.timeframe, sizeof event->signal.timeframe);
         event->signal.confidence = json_get_double(json, "confidence", 0.0);
         event->signal.take_profit = json_get_double(json, "takeProfit", 0.0);
         event->signal.stop_loss = json_get_double(json, "stopLoss", 0.0);
         event->signal.score = json_get_double(json, "score", 0.0);
+        json_get_string(json, "modelVariant", event->signal.model_variant, sizeof event->signal.model_variant);
+        json_get_string(json, "modelVersion", event->signal.model_version, sizeof event->signal.model_version);
+        json_get_string(json, "predictionMode", event->signal.prediction_mode, sizeof event->signal.prediction_mode);
+        json_get_string(json, "confidenceMapping", event->signal.confidence_mapping, sizeof event->signal.confidence_mapping);
+        event->signal.up_probability = json_get_double(json, "upProbability", 0.0);
+        event->signal.down_probability = json_get_double(json, "downProbability", 0.0);
+        event->signal.directional_edge = json_get_double(json, "directionalEdge", 0.0);
+        event->signal.normalized_edge = json_get_double(json, "normalizedEdge", 0.0);
+        event->signal.expected_value = json_get_double(json, "expectedValue", 0.0);
+        json_get_string(json, "regime", event->signal.regime, sizeof event->signal.regime);
+        event->signal.regime_confidence = json_get_double(json, "regimeConfidence", 0.0);
+        json_get_string(json, "volatilityState", event->signal.volatility_state, sizeof event->signal.volatility_state);
+        json_get_string(json, "squeezeState", event->signal.squeeze_state, sizeof event->signal.squeeze_state);
+        json_get_string(json, "trendState", event->signal.trend_state, sizeof event->signal.trend_state);
+        event->signal.atr_percent = json_get_double(json, "atrPercent", 0.0);
+        event->signal.signal_ttl = json_get_double(json, "signalTTL", 0.0);
+        json_get_string(json, "generatedAt", event->signal.generated_at, sizeof event->signal.generated_at);
+        json_get_string(json, "artifactID", event->signal.artifact_id, sizeof event->signal.artifact_id);
+        json_get_string(json, "artifactVersion", event->signal.artifact_version, sizeof event->signal.artifact_version);
+        json_get_string(json, "rejectedReason", event->signal.rejected_reason, sizeof event->signal.rejected_reason);
         event->signal.price = json_get_double(json, "price", 0.0);
         json_get_string(json, "side", side, sizeof side);
         event->signal.side = parse_side(side);
@@ -421,6 +442,7 @@ static void make_order(gsc_position_manager_t *manager, const char *key, const g
     order->lot_size = metadata.lot_size;
     order->tick_size = metadata.tick_size;
     order->leverage = leverage;
+    order->reduce_only = is_exposure_reduction(position->size, position->size + executable_delta);
 }
 
 static int order_meets_minimum(const gsc_order_t *order) {
