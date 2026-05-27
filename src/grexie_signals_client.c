@@ -720,6 +720,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     if (manager->config.min_expected_edge > 0.0 && edge < manager->config.min_expected_edge) return 0;
     double portfolio_budget = max_portfolio_margin_budget(manager);
     double min_delta = effective_min_order_delta(manager);
+    time_t now = time(NULL);
     size_t idx = find_position(manager, signal->venue, signal->instrument);
     if (idx == (size_t)-1 || fabs(manager->positions[idx].size) <= 1e-9) {
         if (portfolio_budget < min_delta || !meets_minimum_position_size(manager, portfolio_budget)) return 0;
@@ -735,10 +736,14 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         }
     } else {
         double is_flip = signum(manager->positions[idx].size) != 0.0 && signum(manager->positions[idx].size) != target_sign;
-        (void)is_flip;
+        int below_minimum = !meets_minimum_position_size(manager, position_margin(manager, key, &manager->positions[idx]));
+        if (!is_flip && !below_minimum && manager->config.rebalance_interval_seconds > 0 && manager->positions[idx].last_signal_at > 0 &&
+            now < manager->positions[idx].last_signal_at + manager->config.rebalance_interval_seconds) {
+            return 0;
+        }
     }
     manager->positions[idx].confidence = target_confidence;
-    manager->positions[idx].last_signal_at = time(NULL);
+    manager->positions[idx].last_signal_at = now;
     if (signal->price > 0.0) {
         manager->positions[idx].last_price = signal->price;
         if (manager->positions[idx].entry_price <= 0.0) manager->positions[idx].entry_price = signal->price;
@@ -855,9 +860,16 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         }
         int is_opening = fabs(manager->positions[i].size) <= 1e-9 && fabs(target) > 1e-9;
         int is_closing = fabs(target) <= 1e-9 && fabs(manager->positions[i].size) > 1e-9;
-        if (!(is_flip || is_opening || is_closing) && margin_for_quantity(manager, NULL, &manager->positions[i], delta) < min_delta) {
-            manager->positions[i].confidence = weights[i];
-            continue;
+        if (!(is_flip || is_opening || is_closing)) {
+            if (margin_for_quantity(manager, NULL, &manager->positions[i], delta) < min_delta) {
+                manager->positions[i].confidence = weights[i];
+                continue;
+            }
+            if (i != idx && manager->config.rebalance_interval_seconds > 0 && manager->positions[i].last_signal_at > 0 &&
+                now < manager->positions[i].last_signal_at + manager->config.rebalance_interval_seconds) {
+                manager->positions[i].confidence = weights[i];
+                continue;
+            }
         }
         const char *reason = is_opening ? "opening" : is_flip ? "flip" : is_closing ? "closing" : "rebalance";
         rebalance_candidate_t candidate;

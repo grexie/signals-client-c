@@ -383,7 +383,7 @@ static void test_closes_position_below_minimum_position_size_ratio(void) {
     config.min_position_size_ratio = 0.01;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
-    config.rebalance_interval_seconds = 0;
+    config.rebalance_interval_seconds = 6 * 60 * 60;
     gsc_position_manager_t manager;
     gsc_position_manager_init(&manager, config);
 
@@ -403,6 +403,7 @@ static void test_closes_position_below_minimum_position_size_ratio(void) {
     position.confidence = 0.5;
     position.entry_price = 100.0;
     position.last_price = 100.0;
+    position.last_signal_at = time(NULL) - 60;
     assert(gsc_position_manager_add_position(&manager, &position) == 0);
 
     gsc_signal_t signal = {0};
