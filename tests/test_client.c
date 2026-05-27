@@ -395,6 +395,8 @@ static void test_closes_position_below_minimum_position_size_ratio(void) {
     asset.equity = 1000.0;
     assert(gsc_asset_manager_update(&manager.assets, &asset) == 0);
     configure_instrument(&manager, "okx", "DUST-USDT-SWAP");
+    manager.instruments.instruments[0].lot_size = 0.1;
+    manager.instruments.instruments[0].min_size = 0.1;
 
     gsc_position_t position = {0};
     snprintf(position.venue, sizeof position.venue, "okx");
@@ -420,6 +422,8 @@ static void test_closes_position_below_minimum_position_size_ratio(void) {
     assert(orders[0].side == GSC_SIDE_SELL);
     assert(strcmp(orders[0].reason, "closing") == 0);
     assert(fabs(orders[0].target_size) <= 1e-9);
+    assert(fabs(orders[0].size_delta + 0.005) <= 1e-9);
+    assert(fabs(orders[0].quantity - 0.005) <= 1e-9);
 }
 
 int main(void) {

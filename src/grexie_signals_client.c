@@ -499,7 +499,8 @@ static void make_order(gsc_position_manager_t *manager, const char *key, const g
     double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
     double requested_abs_delta = fabs(delta);
     double contract_notional = instrument_contract_notional(price, metadata);
-    double quantity = contract_notional > 0.0 ? round_down_to_step(requested_abs_delta, metadata.lot_size) : 0.0;
+    int closes_to_zero = fabs(position->size) > 1e-9 && fabs(position->size + delta) <= 1e-9;
+    double quantity = contract_notional > 0.0 && !closes_to_zero ? round_down_to_step(requested_abs_delta, metadata.lot_size) : requested_abs_delta;
     double notional = quantity * contract_notional;
     double margin = leverage > 0.0 ? notional / leverage : 0.0;
     double executable_delta = signum(delta) * quantity;
