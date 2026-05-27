@@ -837,14 +837,19 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     size_t opening_count = 0;
     for (size_t i = 0; i < manager->position_count; i++) {
         double target = targets[i];
+        if (fabs(manager->positions[i].size) > 1e-9 && !meets_minimum_position_size(manager, position_margin(manager, NULL, &manager->positions[i]))) {
+            target = 0.0;
+        } else if (target != 0.0 && !meets_minimum_position_size(manager, margin_for_quantity(manager, NULL, &manager->positions[i], target))) {
+            if (fabs(manager->positions[i].size) <= 1e-9) {
+                manager->positions[i].confidence = weights[i];
+                continue;
+            }
+            target = 0.0;
+        }
         double delta = target - manager->positions[i].size;
         int is_flip = is_flip_target(manager->positions[i].size, target);
         if (is_flip) delta = -manager->positions[i].size;
         if (fabs(delta) <= 1e-9) {
-            manager->positions[i].confidence = weights[i];
-            continue;
-        }
-        if (target != 0.0 && !meets_minimum_position_size(manager, margin_for_quantity(manager, NULL, &manager->positions[i], target)) && !is_exposure_reduction(manager->positions[i].size, target)) {
             manager->positions[i].confidence = weights[i];
             continue;
         }

@@ -377,6 +377,50 @@ static void test_caps_openings_to_remaining_portfolio_budget_without_asset_snaps
     assert(total <= 0.01 + 1e-9);
 }
 
+static void test_closes_position_below_minimum_position_size_ratio(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.max_margin_ratio = 1.0;
+    config.min_position_size_ratio = 0.01;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    config.rebalance_interval_seconds = 0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+
+    gsc_asset_t asset = {0};
+    snprintf(asset.currency, sizeof asset.currency, "USDT");
+    asset.cash = 1000.0;
+    asset.available = 0.5;
+    asset.used = 999.5;
+    asset.equity = 1000.0;
+    assert(gsc_asset_manager_update(&manager.assets, &asset) == 0);
+    configure_instrument(&manager, "okx", "DUST-USDT-SWAP");
+
+    gsc_position_t position = {0};
+    snprintf(position.venue, sizeof position.venue, "okx");
+    snprintf(position.instrument, sizeof position.instrument, "DUST-USDT-SWAP");
+    position.size = 0.005;
+    position.confidence = 0.5;
+    position.entry_price = 100.0;
+    position.last_price = 100.0;
+    assert(gsc_position_manager_add_position(&manager, &position) == 0);
+
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "DUST-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.02;
+    signal.stop_loss = 0.004;
+    signal.price = 100.0;
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(orders[0].side == GSC_SIDE_SELL);
+    assert(strcmp(orders[0].reason, "closing") == 0);
+    assert(fabs(orders[0].target_size) <= 1e-9);
+}
+
 int main(void) {
     test_parse_signal();
     test_parse_info_and_error();
@@ -389,6 +433,7 @@ int main(void) {
     test_phases_reductions_before_openings();
     test_caps_openings_to_available_exposure();
     test_caps_openings_to_remaining_portfolio_budget_without_asset_snapshots();
+    test_closes_position_below_minimum_position_size_ratio();
     puts("ok");
     return 0;
 }
