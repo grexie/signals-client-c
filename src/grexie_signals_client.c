@@ -191,27 +191,39 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
 gsc_position_manager_config_t gsc_production_position_manager_config(void) {
     gsc_position_manager_config_t config;
     memset(&config, 0, sizeof config);
-    config.position_size = 1.0;
+    config.max_margin_ratio = 1.0;
     config.min_expected_edge = 0.0045;
     config.min_order_delta = 0.20;
+    config.min_position_size_ratio = 0.01;
     config.rebalance_interval_seconds = 6 * 60 * 60;
     config.maker_fee_rate = 0.0002;
     config.taker_fee_rate = 0.0005;
     config.min_leverage = 1.0;
     config.max_leverage = 1.0;
+    config.available_margin_buffer = 0.10;
+    config.executable_margin_buffer = 0.001;
     return config;
 }
 
 void gsc_position_manager_init(gsc_position_manager_t *manager, gsc_position_manager_config_t config) {
     memset(manager, 0, sizeof *manager);
-    if (config.position_size <= 0.0) config.position_size = 1.0;
-    if (config.position_size > 1.0) config.position_size = 1.0;
+    if (config.max_margin_ratio <= 0.0) {
+        if (config.position_size > 0.0 && config.position_size <= 1.0) config.max_margin_ratio = config.position_size;
+        else config.max_margin_ratio = 1.0;
+    }
+    if (config.max_margin_ratio > 1.0) config.max_margin_ratio = 1.0;
     if (config.min_order_delta < 0.0) config.min_order_delta = 0.0;
     if (config.min_order_delta > 1.0) config.min_order_delta = 1.0;
+    if (config.min_position_size_ratio <= 0.0) config.min_position_size_ratio = 0.01;
+    if (config.min_position_size_ratio > 1.0) config.min_position_size_ratio = 1.0;
     if (config.maker_fee_rate <= 0.0) config.maker_fee_rate = 0.0002;
     if (config.taker_fee_rate <= 0.0) config.taker_fee_rate = 0.0005;
     if (config.min_leverage <= 0.0) config.min_leverage = 1.0;
     if (config.max_leverage <= 0.0) config.max_leverage = config.min_leverage;
+    if (config.available_margin_buffer < 0.0) config.available_margin_buffer = 0.0;
+    if (config.available_margin_buffer > 0.95) config.available_margin_buffer = 0.95;
+    if (config.executable_margin_buffer < 0.0) config.executable_margin_buffer = 0.0;
+    if (config.executable_margin_buffer > 0.05) config.executable_margin_buffer = 0.05;
     manager->config = config;
 }
 
@@ -248,23 +260,55 @@ static const gsc_asset_t *find_asset(const gsc_asset_manager_t *manager, const c
     return NULL;
 }
 
+static double positive_or(double a, double b, double c, double fallback) {
+    if (a > 0.0) return a;
+    if (b > 0.0) return b;
+    if (c > 0.0) return c;
+    return fallback;
+}
+
+static double instrument_contract_notional(double price, gsc_instrument_metadata_t metadata) {
+    if (price <= 0.0) return 0.0;
+    double contract_value = metadata.contract_value > 0.0 ? metadata.contract_value : 1.0;
+    double contract_multiplier = metadata.contract_multiplier > 0.0 ? metadata.contract_multiplier : 1.0;
+    return price * contract_value * contract_multiplier;
+}
+
+static double portfolio_capital(const gsc_position_manager_t *manager) {
+    double capital = 0.0;
+    for (size_t i = 0; i < manager->assets.asset_count; i++) {
+        const gsc_asset_t *asset = &manager->assets.assets[i];
+        capital += positive_or(asset->equity, asset->cash + asset->used, asset->cash, 0.0);
+    }
+    return capital > 0.0 ? capital : 1.0;
+}
+
+static double max_portfolio_margin_budget(const gsc_position_manager_t *manager) {
+    if (!manager || manager->config.max_margin_ratio <= 0.0) return 0.0;
+    return portfolio_capital(manager) * manager->config.max_margin_ratio;
+}
+
+static double position_margin(const gsc_position_manager_t *manager, const char *key, const gsc_position_t *position);
+
 static double available_portfolio_budget(const gsc_position_manager_t *manager) {
-    if (!manager || manager->config.position_size <= 0.0) return 0.0;
+    if (!manager || manager->config.max_margin_ratio <= 0.0) return 0.0;
     double used = 0.0;
     for (size_t i = 0; i < manager->position_count; i++) {
-        used += fabs(manager->positions[i].size);
+        char key[GSC_MAX_TEXT * 2];
+        key_for(key, sizeof key, manager->positions[i].venue, manager->positions[i].instrument);
+        used += position_margin(manager, key, &manager->positions[i]);
     }
-    return fmax(0.0, manager->config.position_size - used);
+    return fmax(0.0, max_portfolio_margin_budget(manager) - used);
 }
 
 static double available_exposure_budget(const gsc_position_manager_t *manager, const char *currency) {
     double portfolio_budget = available_portfolio_budget(manager);
     const gsc_asset_t *asset = find_asset(&manager->assets, currency);
     if (!asset) return portfolio_budget;
-    double equity = asset->equity > 0.0 ? asset->equity : asset->cash + asset->used > 0.0 ? asset->cash + asset->used : asset->cash;
-    if (equity <= 0.0) return asset->available > 0.0 ? portfolio_budget : 0.0;
     if (asset->available <= 0.0) return 0.0;
-    return fmin(fmax(0.0, asset->available / equity), portfolio_budget);
+    double budget = fmax(0.0, asset->available);
+    if (manager->config.available_margin_buffer > 0.0) budget *= 1.0 - manager->config.available_margin_buffer;
+    return fmin(budget, portfolio_budget);
 }
 
 static gsc_instrument_metadata_t instrument_metadata(const gsc_position_manager_t *manager, const char *venue, const char *instrument) {
@@ -303,11 +347,23 @@ int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc
         idx = manager->position_count++;
     }
     manager->positions[idx] = *position;
+    if (manager->positions[idx].leverage <= 0.0) manager->positions[idx].leverage = manager->config.min_leverage;
     return 0;
 }
 
 int gsc_position_manager_update_position(gsc_position_manager_t *manager, const gsc_position_t *position) {
     return gsc_position_manager_add_position(manager, position);
+}
+
+int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count) {
+    if (!manager) return -1;
+    manager->position_count = 0;
+    if (!positions) return 0;
+    for (size_t i = 0; i < position_count; i++) {
+        if (positions[i].venue[0] == '\0' || positions[i].instrument[0] == '\0' || fabs(positions[i].size) <= 1e-9) continue;
+        if (gsc_position_manager_add_position(manager, &positions[i]) != 0) return -1;
+    }
+    return 0;
 }
 
 static double taker_fee_rate(gsc_position_manager_t *manager, const char *key) {
@@ -349,24 +405,47 @@ static double expected_edge(const gsc_signal_t *signal) {
 }
 
 typedef struct {
+    double quantity;
     double margin;
     double fee;
 } executable_allocation_t;
 
-static double fee_exposure_for_notional(double notional, double fee_rate, double equity) {
-    if (notional <= 0.0 || fee_rate <= 0.0 || equity <= 0.0) return 0.0;
-    return notional * fee_rate / equity;
+static double margin_for_quantity(const gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double quantity) {
+    if (!manager || !position || fabs(quantity) <= 1e-9) return 0.0;
+    gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
+    double price = round_to_tick(positive_or(position->last_price, position->entry_price, 0.0, 0.0), metadata.tick_size);
+    double contract_notional = instrument_contract_notional(price, metadata);
+    double leverage = position->leverage > 0.0 ? position->leverage : manager->config.min_leverage;
+    (void)key;
+    if (contract_notional <= 0.0 || leverage <= 0.0) return 0.0;
+    return fabs(quantity) * contract_notional / leverage;
 }
 
-static double fee_exposure_for_margin(double margin, double leverage, double fee_rate) {
-    if (margin <= 0.0 || leverage <= 0.0 || fee_rate <= 0.0) return 0.0;
-    return margin * leverage * fee_rate;
+static double position_margin(const gsc_position_manager_t *manager, const char *key, const gsc_position_t *position) {
+    return margin_for_quantity(manager, key, position, position ? position->size : 0.0);
 }
 
-static double position_move(const gsc_position_t *position) {
-    if (position->entry_price <= 0.0 || position->last_price <= 0.0) return 0.0;
-    if (position->size < 0.0) return (position->entry_price - position->last_price) / position->entry_price;
-    return (position->last_price - position->entry_price) / position->entry_price;
+static double realized_gross_for_quantity(const gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double quantity, double exit_price) {
+    if (!manager || !position || quantity <= 1e-9 || position->entry_price <= 0.0 || exit_price <= 0.0) return 0.0;
+    gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
+    double contract_value = metadata.contract_value > 0.0 ? metadata.contract_value : 1.0;
+    double contract_multiplier = metadata.contract_multiplier > 0.0 ? metadata.contract_multiplier : 1.0;
+    double move = exit_price - position->entry_price;
+    (void)key;
+    if (position->size < 0.0) move = position->entry_price - exit_price;
+    return move * quantity * contract_value * contract_multiplier;
+}
+
+static double position_unrealized_pnl(const gsc_position_manager_t *manager, const char *key, const gsc_position_t *position) {
+    if (!position || fabs(position->size) <= 1e-9 || position->entry_price <= 0.0 || position->last_price <= 0.0) return 0.0;
+    return realized_gross_for_quantity(manager, key, position, fabs(position->size), position->last_price);
+}
+
+static double fee_for_quantity(const gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double quantity, double price, double fee_rate) {
+    if (!manager || !position || quantity <= 1e-9 || price <= 0.0 || fee_rate <= 0.0) return 0.0;
+    gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
+    (void)key;
+    return quantity * instrument_contract_notional(price, metadata) * fee_rate;
 }
 
 static void remove_position(gsc_position_manager_t *manager, size_t idx) {
@@ -376,7 +455,7 @@ static void remove_position(gsc_position_manager_t *manager, size_t idx) {
     manager->position_count--;
 }
 
-static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delta, double price, double fee_rate) {
+static void apply_delta(gsc_position_manager_t *manager, const char *key, size_t idx, double delta, double price, double fee_rate) {
     gsc_position_t *position = &manager->positions[idx];
     if (position->size == 0.0 || signum(position->size) == signum(delta)) {
         double next_abs = fabs(position->size) + fabs(delta);
@@ -386,8 +465,7 @@ static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delt
                 : price;
             position->last_price = price;
         }
-        double leverage = position->leverage > 0.0 ? position->leverage : manager->config.min_leverage;
-        double fee = fee_exposure_for_margin(fabs(delta), leverage, fee_rate);
+        double fee = fee_for_quantity(manager, key, position, fabs(delta), price, fee_rate);
         position->fees += fee;
         position->realized_pnl -= fee;
         position->size += delta;
@@ -395,9 +473,8 @@ static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delt
     }
     if (price > 0.0) position->last_price = price;
     double closing = fmin(fabs(position->size), fabs(delta));
-    double gross = position_move(position) * closing;
-    double leverage = position->leverage > 0.0 ? position->leverage : manager->config.min_leverage;
-    double fee = fee_exposure_for_margin(closing, leverage, fee_rate);
+    double gross = realized_gross_for_quantity(manager, key, position, closing, price);
+    double fee = fee_for_quantity(manager, key, position, closing, price, fee_rate);
     position->realized_gross += gross;
     position->fees += fee;
     position->realized_pnl += gross - fee;
@@ -412,24 +489,20 @@ static void apply_delta(gsc_position_manager_t *manager, size_t idx, double delt
     position->last_price = price;
     position->confidence = 0.0;
     position->realized_gross = 0.0;
-    position->fees = fee_exposure_for_margin(remaining, leverage, fee_rate);
+    position->fees = fee_for_quantity(manager, key, position, remaining, price, fee_rate);
     position->realized_pnl = -position->fees;
 }
 
 static void make_order(gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double delta, double edge, double score, const char *reason, double confidence, gsc_order_t *order) {
     gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
-    const gsc_asset_t *asset = find_asset(&manager->assets, metadata.settlement_currency);
-    double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
     double leverage = select_leverage(manager, key, confidence, edge, score);
     double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
     double requested_abs_delta = fabs(delta);
-    double notional = requested_abs_delta * equity * leverage;
-    double quantity = price > 0.0 ? round_down_to_step(notional / price, metadata.lot_size) : 0.0;
-    notional = quantity * price;
-    double executable_abs_delta = requested_abs_delta;
-    if (equity > 0.0 && leverage > 0.0 && price > 0.0) executable_abs_delta = notional / (equity * leverage);
-    if (executable_abs_delta > requested_abs_delta) executable_abs_delta = requested_abs_delta;
-    double executable_delta = signum(delta) * executable_abs_delta;
+    double contract_notional = instrument_contract_notional(price, metadata);
+    double quantity = contract_notional > 0.0 ? round_down_to_step(requested_abs_delta, metadata.lot_size) : 0.0;
+    double notional = quantity * contract_notional;
+    double margin = leverage > 0.0 ? notional / leverage : 0.0;
+    double executable_delta = signum(delta) * quantity;
     memset(order, 0, sizeof *order);
     copy_text(order->venue, sizeof order->venue, position->venue);
     copy_text(order->instrument, sizeof order->instrument, position->instrument);
@@ -443,8 +516,9 @@ static void make_order(gsc_position_manager_t *manager, const char *key, const g
     order->score = score;
     order->expected_edge = edge;
     order->fee_rate = taker_fee_rate(manager, key);
-    order->estimated_fee = fee_exposure_for_notional(notional, order->fee_rate, equity);
+    order->estimated_fee = notional * order->fee_rate;
     order->estimated_fee_value = notional * order->fee_rate;
+    order->margin = margin;
     order->quantity = quantity;
     order->notional = notional;
     copy_text(order->settlement_currency, sizeof order->settlement_currency, metadata.settlement_currency);
@@ -463,29 +537,36 @@ static int order_meets_minimum(const gsc_order_t *order) {
 }
 
 static double order_budget_cost(const gsc_order_t *order) {
-    return fabs(order->size_delta) + fmax(order->estimated_fee, 0.0);
+    return fmax(order->margin, 0.0) + fmax(order->estimated_fee, 0.0);
 }
 
 static executable_allocation_t executable_allocation_for_budget(gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double budget, double confidence, double edge, double score) {
     executable_allocation_t allocation = {0};
     if (budget <= 1e-9) return allocation;
     gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
-    const gsc_asset_t *asset = find_asset(&manager->assets, metadata.settlement_currency);
-    double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
     double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
     double leverage = select_leverage(manager, key, confidence > 0.0 ? confidence : position->confidence, edge, score);
-    if (price <= 0.0 || equity <= 0.0 || leverage <= 0.0) return allocation;
+    double contract_notional = instrument_contract_notional(price, metadata);
+    if (contract_notional <= 0.0 || leverage <= 0.0) return allocation;
     double fee_rate = taker_fee_rate(manager, key);
-    double fee_multiplier = fmax(1.0 + leverage * fee_rate, 1.0);
-    double max_margin = budget / fee_multiplier;
-    double quantity = round_down_to_step(max_margin * equity * leverage / price, metadata.lot_size);
-    if (quantity <= 1e-9) return allocation;
-    if (metadata.min_size > 0.0 && quantity < metadata.min_size) return allocation;
-    allocation.margin = quantity * price / (equity * leverage);
-    allocation.fee = quantity * price * fee_rate / equity;
-    if (allocation.margin + allocation.fee > budget + 1e-9) {
-        allocation.margin = 0.0;
-        allocation.fee = 0.0;
+    double max_margin = budget;
+    if (metadata.lot_size <= 0.0) {
+        double fee_multiplier = 1.0 + leverage * fee_rate;
+        if (fee_multiplier > 0.0) max_margin = budget / fee_multiplier;
+    }
+    double quantity = round_down_to_step(max_margin * leverage / contract_notional, metadata.lot_size);
+    while (quantity > 1e-9) {
+        if (metadata.min_size > 0.0 && quantity < metadata.min_size) return (executable_allocation_t){0};
+        double margin = quantity * contract_notional / leverage;
+        double fee = quantity * contract_notional * fee_rate;
+        if (margin + fee <= budget + 1e-9) {
+            allocation.quantity = quantity;
+            allocation.margin = margin;
+            allocation.fee = fee;
+            return allocation;
+        }
+        if (metadata.lot_size <= 0.0) return (executable_allocation_t){0};
+        quantity = round_down_to_step(quantity - metadata.lot_size, metadata.lot_size);
     }
     return allocation;
 }
@@ -494,13 +575,13 @@ static executable_allocation_t executable_lot_step_cost(gsc_position_manager_t *
     executable_allocation_t allocation = {0};
     gsc_instrument_metadata_t metadata = instrument_metadata(manager, position->venue, position->instrument);
     if (metadata.lot_size <= 0.0) return allocation;
-    const gsc_asset_t *asset = find_asset(&manager->assets, metadata.settlement_currency);
-    double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
     double price = round_to_tick(position->last_price > 0.0 ? position->last_price : position->entry_price, metadata.tick_size);
     double leverage = select_leverage(manager, key, confidence > 0.0 ? confidence : position->confidence, edge, score);
-    if (price <= 0.0 || equity <= 0.0 || leverage <= 0.0) return allocation;
-    allocation.margin = metadata.lot_size * price / (equity * leverage);
-    allocation.fee = metadata.lot_size * price * taker_fee_rate(manager, key) / equity;
+    double contract_notional = instrument_contract_notional(price, metadata);
+    if (contract_notional <= 0.0 || leverage <= 0.0) return allocation;
+    allocation.quantity = metadata.lot_size;
+    allocation.margin = metadata.lot_size * contract_notional / leverage;
+    allocation.fee = metadata.lot_size * contract_notional * taker_fee_rate(manager, key);
     return allocation;
 }
 
@@ -508,10 +589,25 @@ static double cap_opening_delta_to_budget(gsc_position_manager_t *manager, const
     if (fabs(delta) <= 1e-9 || budget <= 1e-9) return 0.0;
     executable_allocation_t executable = executable_allocation_for_budget(manager, key, position, budget, confidence, edge, score);
     if (executable.margin <= 1e-9) return 0.0;
-    if (executable.margin < fabs(delta)) return signum(delta) * executable.margin;
+    if (executable.quantity < fabs(delta)) return signum(delta) * executable.quantity;
     gsc_order_t order;
     make_order(manager, key, position, delta, edge, score, "budget-check", confidence, &order);
-    return order_budget_cost(&order) > budget + 1e-9 ? signum(delta) * executable.margin : delta;
+    return order_budget_cost(&order) > budget + 1e-9 ? signum(delta) * executable.quantity : delta;
+}
+
+static double effective_min_order_delta(const gsc_position_manager_t *manager) {
+    if (!manager || manager->config.min_order_delta <= 0.0) return 0.0;
+    return manager->config.min_order_delta * max_portfolio_margin_budget(manager);
+}
+
+static double minimum_position_size(const gsc_position_manager_t *manager) {
+    if (!manager || manager->config.min_position_size_ratio <= 0.0) return 0.0;
+    return manager->config.min_position_size_ratio * portfolio_capital(manager);
+}
+
+static int meets_minimum_position_size(const gsc_position_manager_t *manager, double size) {
+    double minimum = minimum_position_size(manager);
+    return minimum <= 0.0 || fabs(size) + 1e-9 >= minimum;
 }
 
 typedef struct {
@@ -586,7 +682,7 @@ static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_
         order_count++;
         size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
         if (current_idx == (size_t)-1) continue;
-        apply_delta(manager, current_idx, orders[order_count - 1].size_delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key));
+        apply_delta(manager, candidates[i].key, current_idx, orders[order_count - 1].size_delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key));
         current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
         if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
     }
@@ -603,7 +699,7 @@ size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, cons
     key_for(key, sizeof key, venue, instrument);
     make_order(manager, key, &position, -position.size, 0.0, 0.0, "closing", position.confidence, &orders[0]);
     if (!order_meets_minimum(&orders[0])) return 0;
-    apply_delta(manager, idx, orders[0].size_delta, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key));
+    apply_delta(manager, key, idx, orders[0].size_delta, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key));
     return 1;
 }
 
@@ -622,11 +718,11 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     if (target_sign == 0.0 || target_confidence <= 0.0) return 0;
     double edge = expected_edge(signal) - 2.0 * taker_fee_rate(manager, key);
     if (manager->config.min_expected_edge > 0.0 && edge < manager->config.min_expected_edge) return 0;
-    double target_size = target_sign * manager->config.position_size;
-    double min_delta = manager->config.min_order_delta * manager->config.position_size;
+    double portfolio_budget = max_portfolio_margin_budget(manager);
+    double min_delta = effective_min_order_delta(manager);
     size_t idx = find_position(manager, signal->venue, signal->instrument);
     if (idx == (size_t)-1 || fabs(manager->positions[idx].size) <= 1e-9) {
-        if (fabs(target_size) < min_delta) return 0;
+        if (portfolio_budget < min_delta || !meets_minimum_position_size(manager, portfolio_budget)) return 0;
         if (idx == (size_t)-1) {
             if (manager->position_count >= GSC_MAX_POSITIONS) return 0;
             idx = manager->position_count++;
@@ -639,7 +735,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         }
     } else {
         double is_flip = signum(manager->positions[idx].size) != 0.0 && signum(manager->positions[idx].size) != target_sign;
-        if (!is_flip && min_delta > 0.0 && fabs(target_size - manager->positions[idx].size) < min_delta) return 0;
+        (void)is_flip;
     }
     manager->positions[idx].confidence = target_confidence;
     manager->positions[idx].last_signal_at = time(NULL);
@@ -676,7 +772,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
             if (!active[i]) continue;
             char position_key[GSC_MAX_TEXT * 2];
             key_for(position_key, sizeof position_key, manager->positions[i].venue, manager->positions[i].instrument);
-            double desired_budget = manager->config.position_size * weights[i] / total_weight;
+            double desired_budget = portfolio_budget * weights[i] / total_weight;
             executable_allocation_t executable = executable_allocation_for_budget(manager, position_key, &manager->positions[i], desired_budget, weights[i], edges[i], scores[i]);
             if (executable.margin > 1e-9) continue;
             if (weights[i] < drop_weight) {
@@ -695,14 +791,15 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
             if (!active[i]) continue;
             char position_key[GSC_MAX_TEXT * 2];
             key_for(position_key, sizeof position_key, manager->positions[i].venue, manager->positions[i].instrument);
-            double desired_budget = manager->config.position_size * weights[i] / active_weight;
+            double desired_budget = portfolio_budget * weights[i] / active_weight;
             executable_allocation_t executable = executable_allocation_for_budget(manager, position_key, &manager->positions[i], desired_budget, weights[i], edges[i], scores[i]);
             if (executable.margin <= 1e-9) continue;
-            targets[i] = sides[i] * executable.margin;
+            if (!meets_minimum_position_size(manager, executable.margin)) continue;
+            targets[i] = sides[i] * executable.quantity;
             allocated += executable.margin + executable.fee;
         }
     }
-    double free_budget = manager->config.position_size - allocated;
+    double free_budget = portfolio_budget - allocated;
     int processed[GSC_MAX_POSITIONS];
     memset(processed, 0, sizeof processed);
     while (free_budget > 1e-9) {
@@ -722,12 +819,16 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         executable_allocation_t step = executable_lot_step_cost(manager, position_key, &manager->positions[best_idx], weights[best_idx], edges[best_idx], scores[best_idx]);
         double step_cost = step.margin + step.fee;
         if (step_cost <= 1e-9) {
-            targets[best_idx] += sides[best_idx] * free_budget;
+            executable_allocation_t executable = executable_allocation_for_budget(manager, position_key, &manager->positions[best_idx], free_budget, weights[best_idx], edges[best_idx], scores[best_idx]);
+            if (executable.quantity > 1e-9 && meets_minimum_position_size(manager, executable.margin)) targets[best_idx] += sides[best_idx] * executable.quantity;
             break;
         }
         double steps = floor((free_budget + 1e-9) / step_cost);
         if (steps <= 0.0) continue;
-        targets[best_idx] += sides[best_idx] * steps * step.margin;
+        double next_quantity = targets[best_idx] + sides[best_idx] * steps * step.quantity;
+        double next_margin = step.quantity > 0.0 ? fabs(next_quantity) * step.margin / step.quantity : 0.0;
+        if (!meets_minimum_position_size(manager, next_margin)) continue;
+        targets[best_idx] = next_quantity;
         free_budget -= steps * step_cost;
     }
     rebalance_candidate_t reductions[GSC_MAX_ORDERS];
@@ -743,9 +844,13 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
             manager->positions[i].confidence = weights[i];
             continue;
         }
+        if (target != 0.0 && !meets_minimum_position_size(manager, margin_for_quantity(manager, NULL, &manager->positions[i], target)) && !is_exposure_reduction(manager->positions[i].size, target)) {
+            manager->positions[i].confidence = weights[i];
+            continue;
+        }
         int is_opening = fabs(manager->positions[i].size) <= 1e-9 && fabs(target) > 1e-9;
         int is_closing = fabs(target) <= 1e-9 && fabs(manager->positions[i].size) > 1e-9;
-        if (!(is_flip || is_opening || is_closing) && fabs(delta) < min_delta) {
+        if (!(is_flip || is_opening || is_closing) && margin_for_quantity(manager, NULL, &manager->positions[i], delta) < min_delta) {
             manager->positions[i].confidence = weights[i];
             continue;
         }
@@ -784,12 +889,15 @@ gsc_position_stats_t gsc_position_manager_stats(const gsc_position_manager_t *ma
     for (size_t i = 0; i < manager->position_count; i++) {
         gsc_instrument_metadata_t metadata = instrument_metadata(manager, manager->positions[i].venue, manager->positions[i].instrument);
         const gsc_asset_t *asset = find_asset(&manager->assets, metadata.settlement_currency);
-        double equity = asset && asset->equity > 0.0 ? asset->equity : asset && asset->cash + asset->used > 0.0 ? asset->cash + asset->used : 1.0;
-        double realized = manager->positions[i].realized_pnl * equity;
-        double unrealized = position_move(&manager->positions[i]) * fabs(manager->positions[i].size) * equity;
+        double equity = asset ? positive_or(asset->equity, asset->cash + asset->used, asset->cash, 1.0) : 1.0;
+        char key[GSC_MAX_TEXT * 2];
+        key_for(key, sizeof key, manager->positions[i].venue, manager->positions[i].instrument);
+        double realized = manager->positions[i].realized_pnl;
+        double unrealized = position_unrealized_pnl(manager, key, &manager->positions[i]);
         stats.realized_pnl += realized;
         stats.unrealized_pnl += unrealized;
-        stats.fees += manager->positions[i].fees * equity;
+        stats.fees += manager->positions[i].fees;
+        (void)equity;
     }
     if (stats.equity <= 0.0) stats.equity = 1.0;
     stats.realized_pnl_percent = stats.realized_pnl / stats.equity;

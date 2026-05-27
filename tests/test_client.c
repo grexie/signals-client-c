@@ -14,7 +14,7 @@ static void configure_instrument(gsc_position_manager_t *manager, const char *ve
 }
 
 static double test_order_budget_cost(const gsc_order_t *order) {
-    return fabs(order->size_delta) + fmax(order->estimated_fee, 0.0);
+    return fmax(order->margin, 0.0) + fmax(order->estimated_fee, 0.0);
 }
 
 static void test_parse_signal(void) {
@@ -45,7 +45,7 @@ static void test_parse_info_and_error(void) {
 
 static void test_position_manager_flip(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.10;
+    config.max_margin_ratio = 0.10;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.20;
     config.max_leverage = 5.0;
@@ -89,7 +89,7 @@ static void test_position_manager_flip(void) {
 
 static void test_ignores_unconfigured_signals(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.10;
+    config.max_margin_ratio = 0.10;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     gsc_position_manager_t manager;
@@ -115,7 +115,7 @@ static void test_ignores_unconfigured_signals(void) {
 
 static void test_ignores_replay_events(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.10;
+    config.max_margin_ratio = 0.10;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     gsc_position_manager_t manager;
@@ -145,7 +145,7 @@ static void test_ignores_replay_events(void) {
 
 static double leverage_for(const char *instrument_name, double confidence, double take_profit, double score) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 1.0;
+    config.max_margin_ratio = 1.0;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     config.min_leverage = 1.0;
@@ -180,7 +180,7 @@ static void test_leverage_adapts_with_confidence_edge_and_score(void) {
 
 static void test_asset_instrument_order_and_stats(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.10;
+    config.max_margin_ratio = 0.10;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     config.max_leverage = 5.0;
@@ -230,7 +230,7 @@ static void test_asset_instrument_order_and_stats(void) {
 
 static void test_rejects_below_min_size(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.01;
+    config.max_margin_ratio = 0.01;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     gsc_position_manager_t manager;
@@ -265,7 +265,7 @@ static void test_rejects_below_min_size(void) {
 
 static void test_phases_reductions_before_openings(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.20;
+    config.max_margin_ratio = 0.20;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     gsc_position_manager_t manager;
@@ -283,7 +283,7 @@ static void test_phases_reductions_before_openings(void) {
     gsc_position_t position = {0};
     snprintf(position.venue, sizeof position.venue, "okx");
     snprintf(position.instrument, sizeof position.instrument, "BTC-USDT-SWAP");
-    position.size = 0.15;
+    position.size = 2.0;
     position.confidence = 1.0;
     position.entry_price = 100.0;
     position.last_price = 100.0;
@@ -302,7 +302,7 @@ static void test_phases_reductions_before_openings(void) {
     assert(n == 1);
     assert(strcmp(orders[0].instrument, "BTC-USDT-SWAP") == 0);
     assert(orders[0].side == GSC_SIDE_SELL);
-    assert(fabs(orders[0].target_size - (0.10 / (1.0 + orders[0].leverage * orders[0].fee_rate))) < 1e-9);
+    assert(fabs(orders[0].target_size - ((100.0 / (1.0 + orders[0].leverage * orders[0].fee_rate)) / orders[0].price)) < 1e-9);
 
     n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
     assert(n == 1);
@@ -312,7 +312,7 @@ static void test_phases_reductions_before_openings(void) {
 
 static void test_caps_openings_to_available_exposure(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 0.20;
+    config.max_margin_ratio = 0.20;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.0;
     gsc_position_manager_t manager;
@@ -337,13 +337,13 @@ static void test_caps_openings_to_available_exposure(void) {
     gsc_order_t orders[GSC_MAX_ORDERS];
     size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
     assert(n == 1);
-    assert(test_order_budget_cost(&orders[0]) <= 0.05 + 1e-9);
-    assert(orders[0].size_delta < 0.05);
+    assert(test_order_budget_cost(&orders[0]) <= 50.0 + 1e-9);
+    assert(orders[0].margin < 50.0);
 }
 
 static void test_caps_openings_to_remaining_portfolio_budget_without_asset_snapshots(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
-    config.position_size = 1.0;
+    config.max_margin_ratio = 1.0;
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.20;
     config.min_leverage = 1.0;
@@ -374,7 +374,7 @@ static void test_caps_openings_to_remaining_portfolio_budget_without_asset_snaps
     for (size_t i = 0; i < manager.position_count; i++) {
         total += fabs(manager.positions[i].size);
     }
-    assert(total <= 1.0 + 1e-9);
+    assert(total <= 0.01 + 1e-9);
 }
 
 int main(void) {

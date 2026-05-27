@@ -108,6 +108,8 @@ typedef struct {
     double lot_size;
     double min_size;
     double tick_size;
+    double contract_value;
+    double contract_multiplier;
     double max_leverage;
 } gsc_instrument_metadata_t;
 
@@ -122,14 +124,18 @@ typedef struct {
 } gsc_instrument_override_t;
 
 typedef struct {
+    double max_margin_ratio;
     double position_size;
     double min_expected_edge;
     double min_order_delta;
+    double min_position_size_ratio;
     long rebalance_interval_seconds;
     double maker_fee_rate;
     double taker_fee_rate;
     double min_leverage;
     double max_leverage;
+    double available_margin_buffer;
+    double executable_margin_buffer;
     gsc_instrument_override_t instruments[32];
     size_t instrument_count;
 } gsc_position_manager_config_t;
@@ -166,6 +172,7 @@ typedef struct {
     double fee_rate;
     double estimated_fee;
     double estimated_fee_value;
+    double margin;
     double quantity;
     double notional;
     char settlement_currency[GSC_MAX_TEXT];
@@ -211,6 +218,7 @@ int gsc_asset_manager_update(gsc_asset_manager_t *manager, const gsc_asset_t *as
 int gsc_instrument_manager_update(gsc_instrument_manager_t *manager, const gsc_instrument_metadata_t *instrument);
 int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position);
 int gsc_position_manager_update_position(gsc_position_manager_t *manager, const gsc_position_t *position);
+int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count);
 size_t gsc_position_manager_handle_event(gsc_position_manager_t *manager, const gsc_event_t *event, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const gsc_signal_t *signal, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, const char *venue, const char *instrument, gsc_order_t *orders, size_t max_orders);
