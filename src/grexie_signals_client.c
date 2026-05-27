@@ -248,13 +248,23 @@ static const gsc_asset_t *find_asset(const gsc_asset_manager_t *manager, const c
     return NULL;
 }
 
+static double available_portfolio_budget(const gsc_position_manager_t *manager) {
+    if (!manager || manager->config.position_size <= 0.0) return 0.0;
+    double used = 0.0;
+    for (size_t i = 0; i < manager->position_count; i++) {
+        used += fabs(manager->positions[i].size);
+    }
+    return fmax(0.0, manager->config.position_size - used);
+}
+
 static double available_exposure_budget(const gsc_position_manager_t *manager, const char *currency) {
+    double portfolio_budget = available_portfolio_budget(manager);
     const gsc_asset_t *asset = find_asset(&manager->assets, currency);
-    if (!asset) return HUGE_VAL;
+    if (!asset) return portfolio_budget;
     double equity = asset->equity > 0.0 ? asset->equity : asset->cash + asset->used > 0.0 ? asset->cash + asset->used : asset->cash;
-    if (equity <= 0.0) return asset->available > 0.0 ? HUGE_VAL : 0.0;
+    if (equity <= 0.0) return asset->available > 0.0 ? portfolio_budget : 0.0;
     if (asset->available <= 0.0) return 0.0;
-    return fmax(0.0, asset->available / equity);
+    return fmin(fmax(0.0, asset->available / equity), portfolio_budget);
 }
 
 static gsc_instrument_metadata_t instrument_metadata(const gsc_position_manager_t *manager, const char *venue, const char *instrument) {

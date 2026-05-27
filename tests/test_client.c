@@ -341,6 +341,42 @@ static void test_caps_openings_to_available_exposure(void) {
     assert(orders[0].size_delta < 0.05);
 }
 
+static void test_caps_openings_to_remaining_portfolio_budget_without_asset_snapshots(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.position_size = 1.0;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.20;
+    config.min_leverage = 1.0;
+    config.max_leverage = 1.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+    configure_instrument(&manager, "okx", "ETH-USDT-SWAP");
+
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.02;
+    signal.stop_loss = 0.004;
+    signal.price = 100.0;
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+
+    snprintf(signal.instrument, sizeof signal.instrument, "ETH-USDT-SWAP");
+    signal.confidence = 0.10;
+    n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n <= 1);
+
+    double total = 0.0;
+    for (size_t i = 0; i < manager.position_count; i++) {
+        total += fabs(manager.positions[i].size);
+    }
+    assert(total <= 1.0 + 1e-9);
+}
+
 int main(void) {
     test_parse_signal();
     test_parse_info_and_error();
@@ -352,6 +388,7 @@ int main(void) {
     test_rejects_below_min_size();
     test_phases_reductions_before_openings();
     test_caps_openings_to_available_exposure();
+    test_caps_openings_to_remaining_portfolio_budget_without_asset_snapshots();
     puts("ok");
     return 0;
 }
