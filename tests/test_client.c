@@ -19,13 +19,16 @@ static double test_order_budget_cost(const gsc_order_t *order) {
 
 static void test_parse_signal(void) {
     gsc_event_t event;
-    int rc = gsc_parse_event("{\"type\":\"signal\",\"subscriptionId\":2,\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"replay\":true,\"signal\":{\"confidence\":0.8,\"side\":\"buy\",\"takeProfit\":0.01,\"stopLoss\":0.004}}", &event);
+    int rc = gsc_parse_event("{\"type\":\"signal\",\"subscriptionId\":2,\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"replay\":true,\"signal\":{\"confidence\":0.8,\"side\":\"buy\",\"takeProfit\":0.01,\"stopLoss\":0.004,\"trailingStopActivation\":0.02,\"trailingStopDistance\":0.01,\"trailingStopMinProfit\":0.001}}", &event);
     assert(rc == 0);
     assert(event.type == GSC_EVENT_SIGNAL);
     assert(event.subscription_id == 2);
     assert(strcmp(event.signal.venue, "okx") == 0);
     assert(strcmp(event.signal.instrument, "BTC-USDT-SWAP") == 0);
     assert(event.signal.side == GSC_SIDE_BUY);
+    assert(fabs(event.signal.trailing_stop_activation - 0.02) < 1e-9);
+    assert(fabs(event.signal.trailing_stop_distance - 0.01) < 1e-9);
+    assert(fabs(event.signal.trailing_stop_min_profit - 0.001) < 1e-9);
     assert(event.replay == 1);
 }
 
@@ -341,6 +344,70 @@ static void test_caps_openings_to_available_exposure(void) {
     assert(orders[0].margin < 50.0);
 }
 
+static void test_trailing_stop_closes_after_favorable_giveback(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.max_margin_ratio = 1.0;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.50;
+    signal.stop_loss = 0.20;
+    signal.trailing_stop_activation = 0.02;
+    signal.trailing_stop_distance = 0.01;
+    signal.trailing_stop_min_profit = 0.001;
+    signal.price = 100.0;
+
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(fabs(orders[0].trailing_stop_activation - 0.02) < 1e-9);
+    n = gsc_position_manager_update_price(&manager, "okx", "BTC-USDT-SWAP", 103.0, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+    n = gsc_position_manager_update_price(&manager, "okx", "BTC-USDT-SWAP", 101.8, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(strcmp(orders[0].reason, "trailing_stop") == 0);
+    assert(orders[0].mfe >= 0.03 - 1e-9);
+    assert(manager.position_count == 0);
+}
+
+static void test_trailing_activation_is_at_least_breakeven(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.max_margin_ratio = 1.0;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    config.taker_fee_rate = 0.0005;
+    config.instrument_count = 1;
+    snprintf(config.instruments[0].key, sizeof config.instruments[0].key, "okx:BTC-USDT-SWAP");
+    config.instruments[0].config.trailing_stop_activation = 0.0001;
+    config.instruments[0].config.trailing_stop_distance = 0.01;
+
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.50;
+    signal.stop_loss = 0.20;
+    signal.price = 100.0;
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(fabs(orders[0].trailing_stop_min_profit - 0.001) < 1e-9);
+    assert(fabs(orders[0].trailing_stop_activation - 0.002) < 1e-9);
+}
+
 static void test_caps_openings_to_remaining_portfolio_budget_without_asset_snapshots(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
     config.max_margin_ratio = 1.0;
@@ -437,6 +504,8 @@ int main(void) {
     test_rejects_below_min_size();
     test_phases_reductions_before_openings();
     test_caps_openings_to_available_exposure();
+    test_trailing_stop_closes_after_favorable_giveback();
+    test_trailing_activation_is_at_least_breakeven();
     test_caps_openings_to_remaining_portfolio_budget_without_asset_snapshots();
     test_closes_position_below_minimum_position_size_ratio();
     puts("ok");

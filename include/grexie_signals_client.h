@@ -36,6 +36,9 @@ typedef struct {
     gsc_side_t side;
     double take_profit;
     double stop_loss;
+    double trailing_stop_activation;
+    double trailing_stop_distance;
+    double trailing_stop_min_profit;
     double score;
     char model_variant[GSC_MAX_TEXT];
     char model_version[GSC_MAX_TEXT];
@@ -86,6 +89,9 @@ typedef struct {
     double taker_fee_rate;
     double min_leverage;
     double max_leverage;
+    double trailing_stop_activation;
+    double trailing_stop_distance;
+    double trailing_stop_min_profit;
 } gsc_instrument_config_t;
 
 typedef struct {
@@ -149,7 +155,12 @@ typedef struct {
     double last_price;
     double take_profit;
     double stop_loss;
+    double trailing_stop_activation;
+    double trailing_stop_distance;
+    double trailing_stop_min_profit;
     double leverage;
+    double mfe;
+    double mae;
     double realized_gross;
     double fees;
     double realized_pnl;
@@ -182,6 +193,12 @@ typedef struct {
     double leverage;
     double take_profit;
     double stop_loss;
+    double trailing_stop_activation;
+    double trailing_stop_distance;
+    double trailing_stop_min_profit;
+    double exit_move;
+    double mfe;
+    double mae;
     int reduce_only;
 } gsc_order_t;
 
@@ -221,6 +238,7 @@ int gsc_position_manager_update_position(gsc_position_manager_t *manager, const 
 int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count);
 size_t gsc_position_manager_handle_event(gsc_position_manager_t *manager, const gsc_event_t *event, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const gsc_signal_t *signal, gsc_order_t *orders, size_t max_orders);
+size_t gsc_position_manager_update_price(gsc_position_manager_t *manager, const char *venue, const char *instrument, double price, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, const char *venue, const char *instrument, gsc_order_t *orders, size_t max_orders);
 gsc_position_stats_t gsc_position_manager_stats(const gsc_position_manager_t *manager);
 

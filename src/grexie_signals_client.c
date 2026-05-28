@@ -160,6 +160,9 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
         event->signal.confidence = json_get_double(json, "confidence", 0.0);
         event->signal.take_profit = json_get_double(json, "takeProfit", 0.0);
         event->signal.stop_loss = json_get_double(json, "stopLoss", 0.0);
+        event->signal.trailing_stop_activation = json_get_double(json, "trailingStopActivation", 0.0);
+        event->signal.trailing_stop_distance = json_get_double(json, "trailingStopDistance", 0.0);
+        event->signal.trailing_stop_min_profit = json_get_double(json, "trailingStopMinProfit", 0.0);
         event->signal.score = json_get_double(json, "score", 0.0);
         json_get_string(json, "modelVariant", event->signal.model_variant, sizeof event->signal.model_variant);
         json_get_string(json, "modelVersion", event->signal.model_version, sizeof event->signal.model_version);
@@ -224,6 +227,15 @@ void gsc_position_manager_init(gsc_position_manager_t *manager, gsc_position_man
     if (config.available_margin_buffer > 0.95) config.available_margin_buffer = 0.95;
     if (config.executable_margin_buffer < 0.0) config.executable_margin_buffer = 0.0;
     if (config.executable_margin_buffer > 0.05) config.executable_margin_buffer = 0.05;
+    for (size_t i = 0; i < config.instrument_count; i++) {
+        if (config.instruments[i].config.maker_fee_rate < 0.0) config.instruments[i].config.maker_fee_rate = 0.0;
+        if (config.instruments[i].config.taker_fee_rate < 0.0) config.instruments[i].config.taker_fee_rate = 0.0;
+        if (config.instruments[i].config.min_leverage < 0.0) config.instruments[i].config.min_leverage = 0.0;
+        if (config.instruments[i].config.max_leverage < 0.0) config.instruments[i].config.max_leverage = 0.0;
+        if (config.instruments[i].config.trailing_stop_activation < 0.0) config.instruments[i].config.trailing_stop_activation = 0.0;
+        if (config.instruments[i].config.trailing_stop_distance < 0.0) config.instruments[i].config.trailing_stop_distance = 0.0;
+        if (config.instruments[i].config.trailing_stop_min_profit < 0.0) config.instruments[i].config.trailing_stop_min_profit = 0.0;
+    }
     manager->config = config;
 }
 
@@ -375,6 +387,89 @@ static double taker_fee_rate(gsc_position_manager_t *manager, const char *key) {
     return manager->config.taker_fee_rate;
 }
 
+static double maker_fee_rate(gsc_position_manager_t *manager, const char *key) {
+    for (size_t i = 0; i < manager->config.instrument_count; i++) {
+        if (strcmp(manager->config.instruments[i].key, key) == 0 && manager->config.instruments[i].config.maker_fee_rate > 0.0) {
+            return manager->config.instruments[i].config.maker_fee_rate;
+        }
+    }
+    return manager->config.maker_fee_rate;
+}
+
+static double price_move(const gsc_position_t *position) {
+    if (!position || position->entry_price <= 0.0 || position->last_price <= 0.0) return 0.0;
+    return position->size < 0.0
+        ? (position->entry_price - position->last_price) / position->entry_price
+        : (position->last_price - position->entry_price) / position->entry_price;
+}
+
+static void reset_excursion(gsc_position_t *position) {
+    double move = price_move(position);
+    position->mfe = fmax(move, 0.0);
+    position->mae = fmin(move, 0.0);
+}
+
+static void update_excursion(gsc_position_t *position) {
+    double move = price_move(position);
+    position->mfe = fmax(position->mfe, move);
+    position->mae = fmin(position->mae, move);
+}
+
+static int take_profit_triggered(const gsc_position_t *position, double price) {
+    if (!position || position->entry_price <= 0.0 || position->take_profit <= 0.0 || price <= 0.0) return 0;
+    double target = position->size < 0.0
+        ? position->entry_price * (1.0 - position->take_profit)
+        : position->entry_price * (1.0 + position->take_profit);
+    return position->size < 0.0 ? price <= target : price >= target;
+}
+
+static int stop_loss_triggered(const gsc_position_t *position, double price) {
+    if (!position || position->entry_price <= 0.0 || position->stop_loss <= 0.0 || price <= 0.0) return 0;
+    double target = position->size < 0.0
+        ? position->entry_price * (1.0 + position->stop_loss)
+        : position->entry_price * (1.0 - position->stop_loss);
+    return position->size < 0.0 ? price >= target : price <= target;
+}
+
+static int trailing_stop_triggered(const gsc_position_t *position) {
+    if (!position || position->trailing_stop_activation <= 0.0 || position->trailing_stop_distance <= 0.0) return 0;
+    if (position->mfe + 1e-9 < position->trailing_stop_activation) return 0;
+    double floor = fmax(position->mfe - position->trailing_stop_distance, position->trailing_stop_min_profit);
+    return price_move(position) <= floor + 1e-9;
+}
+
+static const char *exit_reason(const gsc_position_t *position, double price) {
+    if (take_profit_triggered(position, price)) return "take_profit";
+    if (stop_loss_triggered(position, price)) return "stop_loss";
+    if (trailing_stop_triggered(position)) return "trailing_stop";
+    return "";
+}
+
+static void trailing_config_for_signal(gsc_position_manager_t *manager, const char *key, const gsc_signal_t *signal, double *activation, double *distance, double *min_profit) {
+    *activation = signal->trailing_stop_activation;
+    *distance = signal->trailing_stop_distance;
+    *min_profit = signal->trailing_stop_min_profit;
+    if (*activation <= 0.0 || *distance <= 0.0) {
+        for (size_t i = 0; i < manager->config.instrument_count; i++) {
+            if (strcmp(manager->config.instruments[i].key, key) == 0) {
+                *activation = manager->config.instruments[i].config.trailing_stop_activation;
+                *distance = manager->config.instruments[i].config.trailing_stop_distance;
+                *min_profit = manager->config.instruments[i].config.trailing_stop_min_profit;
+                break;
+            }
+        }
+    }
+    if (*activation <= 0.0 || *distance <= 0.0) {
+        *activation = 0.0;
+        *distance = 0.0;
+        *min_profit = 0.0;
+        return;
+    }
+    double fee_floor = 2.0 * taker_fee_rate(manager, key);
+    if (*min_profit < fee_floor) *min_profit = fee_floor;
+    if (*activation < *min_profit + 1e-9) *activation = *min_profit + fmin(*distance, fee_floor);
+}
+
 static double select_leverage(gsc_position_manager_t *manager, const char *key, double confidence, double edge, double score) {
     double min_lev = manager->config.min_leverage;
     double max_lev = manager->config.max_leverage;
@@ -455,7 +550,8 @@ static void remove_position(gsc_position_manager_t *manager, size_t idx) {
     manager->position_count--;
 }
 
-static void apply_delta(gsc_position_manager_t *manager, const char *key, size_t idx, double delta, double price, double fee_rate) {
+static void apply_delta(gsc_position_manager_t *manager, const char *key, size_t idx, double delta, double price, double fee_rate, const char *reason) {
+    (void)reason;
     gsc_position_t *position = &manager->positions[idx];
     if (position->size == 0.0 || signum(position->size) == signum(delta)) {
         double next_abs = fabs(position->size) + fabs(delta);
@@ -469,9 +565,11 @@ static void apply_delta(gsc_position_manager_t *manager, const char *key, size_t
         position->fees += fee;
         position->realized_pnl -= fee;
         position->size += delta;
+        reset_excursion(position);
         return;
     }
     if (price > 0.0) position->last_price = price;
+    update_excursion(position);
     double closing = fmin(fabs(position->size), fabs(delta));
     double gross = realized_gross_for_quantity(manager, key, position, closing, price);
     double fee = fee_for_quantity(manager, key, position, closing, price, fee_rate);
@@ -491,6 +589,7 @@ static void apply_delta(gsc_position_manager_t *manager, const char *key, size_t
     position->realized_gross = 0.0;
     position->fees = fee_for_quantity(manager, key, position, remaining, price, fee_rate);
     position->realized_pnl = -position->fees;
+    reset_excursion(position);
 }
 
 static void make_order(gsc_position_manager_t *manager, const char *key, const gsc_position_t *position, double delta, double edge, double score, const char *reason, double confidence, gsc_order_t *order) {
@@ -527,6 +626,12 @@ static void make_order(gsc_position_manager_t *manager, const char *key, const g
     order->lot_size = metadata.lot_size;
     order->tick_size = metadata.tick_size;
     order->leverage = leverage;
+    order->trailing_stop_activation = position->trailing_stop_activation;
+    order->trailing_stop_distance = position->trailing_stop_distance;
+    order->trailing_stop_min_profit = position->trailing_stop_min_profit;
+    order->exit_move = price_move(position);
+    order->mfe = position->mfe;
+    order->mae = position->mae;
     order->reduce_only = is_exposure_reduction(position->size, position->size + executable_delta);
 }
 
@@ -620,6 +725,9 @@ typedef struct {
     double score;
     double take_profit;
     double stop_loss;
+    double trailing_stop_activation;
+    double trailing_stop_distance;
+    double trailing_stop_min_profit;
     char reason[32];
 } rebalance_candidate_t;
 
@@ -672,6 +780,9 @@ static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_
         make_order(manager, candidates[i].key, &candidates[i].position, delta, candidates[i].edge, candidates[i].score, candidates[i].reason, candidates[i].weight, &orders[order_count]);
         orders[order_count].take_profit = candidates[i].take_profit;
         orders[order_count].stop_loss = candidates[i].stop_loss;
+        orders[order_count].trailing_stop_activation = candidates[i].trailing_stop_activation;
+        orders[order_count].trailing_stop_distance = candidates[i].trailing_stop_distance;
+        orders[order_count].trailing_stop_min_profit = candidates[i].trailing_stop_min_profit;
         if (!order_meets_minimum(&orders[order_count])) {
             size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
             if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
@@ -683,9 +794,16 @@ static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_
         order_count++;
         size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
         if (current_idx == (size_t)-1) continue;
-        apply_delta(manager, candidates[i].key, current_idx, orders[order_count - 1].size_delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key));
+        apply_delta(manager, candidates[i].key, current_idx, orders[order_count - 1].size_delta, candidates[i].position.last_price > 0.0 ? candidates[i].position.last_price : candidates[i].position.entry_price, taker_fee_rate(manager, candidates[i].key), candidates[i].reason);
         current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
-        if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
+        if (current_idx != (size_t)-1) {
+            manager->positions[current_idx].confidence = candidates[i].weight;
+            if (candidates[i].trailing_stop_activation > 0.0 && candidates[i].trailing_stop_distance > 0.0) {
+                manager->positions[current_idx].trailing_stop_activation = candidates[i].trailing_stop_activation;
+                manager->positions[current_idx].trailing_stop_distance = candidates[i].trailing_stop_distance;
+                manager->positions[current_idx].trailing_stop_min_profit = candidates[i].trailing_stop_min_profit;
+            }
+        }
     }
     return order_count;
 }
@@ -700,7 +818,28 @@ size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, cons
     key_for(key, sizeof key, venue, instrument);
     make_order(manager, key, &position, -position.size, 0.0, 0.0, "closing", position.confidence, &orders[0]);
     if (!order_meets_minimum(&orders[0])) return 0;
-    apply_delta(manager, key, idx, orders[0].size_delta, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key));
+    apply_delta(manager, key, idx, orders[0].size_delta, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key), "closing");
+    return 1;
+}
+
+size_t gsc_position_manager_update_price(gsc_position_manager_t *manager, const char *venue, const char *instrument, double price, gsc_order_t *orders, size_t max_orders) {
+    if (!manager || !venue || !instrument || !orders || max_orders == 0 || price <= 0.0) return 0;
+    size_t idx = find_position(manager, venue, instrument);
+    if (idx == (size_t)-1 || fabs(manager->positions[idx].size) <= 1e-9) return 0;
+    char key[GSC_MAX_TEXT * 2];
+    key_for(key, sizeof key, venue, instrument);
+    manager->positions[idx].last_price = price;
+    update_excursion(&manager->positions[idx]);
+    const char *reason = exit_reason(&manager->positions[idx], price);
+    if (!reason || reason[0] == '\0') return 0;
+    gsc_position_t position = manager->positions[idx];
+    make_order(manager, key, &position, -position.size, 0.0, 0.0, reason, position.confidence, &orders[0]);
+    double fee_rate = strcmp(reason, "take_profit") == 0 ? maker_fee_rate(manager, key) : taker_fee_rate(manager, key);
+    orders[0].fee_rate = fee_rate;
+    orders[0].estimated_fee = orders[0].notional * fee_rate;
+    orders[0].estimated_fee_value = orders[0].notional * fee_rate;
+    if (!order_meets_minimum(&orders[0])) return 0;
+    apply_delta(manager, key, idx, orders[0].size_delta, price, fee_rate, reason);
     return 1;
 }
 
@@ -719,6 +858,10 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     if (target_sign == 0.0 || target_confidence <= 0.0) return 0;
     double edge = expected_edge(signal) - 2.0 * taker_fee_rate(manager, key);
     if (manager->config.min_expected_edge > 0.0 && edge < manager->config.min_expected_edge) return 0;
+    double trailing_stop_activation = 0.0;
+    double trailing_stop_distance = 0.0;
+    double trailing_stop_min_profit = 0.0;
+    trailing_config_for_signal(manager, key, signal, &trailing_stop_activation, &trailing_stop_distance, &trailing_stop_min_profit);
     double portfolio_budget = max_portfolio_margin_budget(manager);
     double min_delta = effective_min_order_delta(manager);
     time_t now = time(NULL);
@@ -751,6 +894,11 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     }
     manager->positions[idx].take_profit = signal->take_profit;
     manager->positions[idx].stop_loss = signal->stop_loss;
+    if (trailing_stop_activation > 0.0 && trailing_stop_distance > 0.0) {
+        manager->positions[idx].trailing_stop_activation = trailing_stop_activation;
+        manager->positions[idx].trailing_stop_distance = trailing_stop_distance;
+        manager->positions[idx].trailing_stop_min_profit = trailing_stop_min_profit;
+    }
     manager->positions[idx].leverage = select_leverage(manager, key, target_confidence, edge, signal->score);
 
     double weights[GSC_MAX_POSITIONS];
@@ -883,6 +1031,9 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         candidate.score = i == idx ? signal->score : 0.0;
         candidate.take_profit = i == idx ? signal->take_profit : 0.0;
         candidate.stop_loss = i == idx ? signal->stop_loss : 0.0;
+        candidate.trailing_stop_activation = i == idx ? trailing_stop_activation : 0.0;
+        candidate.trailing_stop_distance = i == idx ? trailing_stop_distance : 0.0;
+        candidate.trailing_stop_min_profit = i == idx ? trailing_stop_min_profit : 0.0;
         copy_text(candidate.reason, sizeof candidate.reason, reason);
         if (is_exposure_reduction(manager->positions[i].size, manager->positions[i].size + delta)) {
             if (reduction_count < GSC_MAX_ORDERS) reductions[reduction_count++] = candidate;
