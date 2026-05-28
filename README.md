@@ -70,6 +70,22 @@ Use `gsc_asset_manager_update` for cash, available balance, used margin, and equ
 
 Call `gsc_position_manager_stats` for realized and unrealized PnL in account value and percent.
 
+## signalsbot Paper Trader Example
+
+The `examples/signalsbot` directory contains a command-line paper trader that reads `.env`, subscribes to `SIGNALS_INSTRUMENTS`, consumes OKX candles, connects with `SIGNALS_WEBSOCKET_TOKEN`, and persists the position manager `initial_state`/`persist` workflow to SQLite.
+
+```sh
+cd examples/signalsbot
+cp .env.example .env
+make
+./signalsbot papertrader
+./signalsbot clean
+docker compose up --build
+docker compose run --rm signalsbot clean
+```
+
+Set `SIGNALS_WEBSOCKET_URL` to override `wss://signals.grexie.com/ws`. Docker Compose stores the local database in the `signalsbot-data` volume.
+
 ## Packaging
 
 The stable public header is `include/grexie_signals_client.h`; the static library target is `libgrexie_signals_client.a`.
