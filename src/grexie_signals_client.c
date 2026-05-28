@@ -32,6 +32,14 @@ static int is_exposure_reduction(double previous_size, double target_size) {
     return fabs(target_size) < fabs(previous_size) - 1e-9;
 }
 
+static double manage_positions_only_target_size(double previous_size, double target_size) {
+    if (fabs(previous_size) <= 1e-9) return 0.0;
+    if (fabs(target_size) <= 1e-9) return 0.0;
+    if (!same_sign(previous_size, target_size)) return 0.0;
+    if (fabs(target_size) > fabs(previous_size)) return previous_size;
+    return target_size;
+}
+
 static void copy_text(char *dst, size_t dst_len, const char *src) {
     if (!dst || dst_len == 0) return;
     if (!src) src = "";
@@ -184,6 +192,7 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
         json_get_string(json, "artifactID", event->signal.artifact_id, sizeof event->signal.artifact_id);
         json_get_string(json, "artifactVersion", event->signal.artifact_version, sizeof event->signal.artifact_version);
         json_get_string(json, "rejectedReason", event->signal.rejected_reason, sizeof event->signal.rejected_reason);
+        event->signal.manage_positions_only = json_get_bool(json, "managePositionsOnly");
         event->signal.price = json_get_double(json, "price", 0.0);
         json_get_string(json, "side", side, sizeof side);
         event->signal.side = parse_side(side);
@@ -762,6 +771,7 @@ typedef struct {
     double trailing_stop_activation;
     double trailing_stop_distance;
     double trailing_stop_min_profit;
+    int manage_positions_only;
     char reason[32];
 } rebalance_candidate_t;
 
@@ -796,6 +806,11 @@ static size_t materialize_candidates(gsc_position_manager_t *manager, rebalance_
     size_t order_count = 0;
     for (size_t i = 0; i < candidate_count && order_count < max_orders; i++) {
         double delta = candidates[i].delta;
+        if (candidates[i].manage_positions_only && !is_exposure_reduction(candidates[i].position.size, candidates[i].position.size + delta)) {
+            size_t current_idx = find_position(manager, candidates[i].position.venue, candidates[i].position.instrument);
+            if (current_idx != (size_t)-1) manager->positions[current_idx].confidence = candidates[i].weight;
+            continue;
+        }
         if (cap_openings && !is_exposure_reduction(candidates[i].position.size, candidates[i].position.size + delta)) {
             gsc_instrument_metadata_t metadata = instrument_metadata(manager, candidates[i].position.venue, candidates[i].position.instrument);
             double available = available_exposure_budget(manager, metadata.settlement_currency) - currency_used(usage, usage_count, metadata.settlement_currency);
@@ -899,7 +914,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     double target_confidence = clamp01(signal->confidence);
     if (target_sign == 0.0 || target_confidence <= 0.0) return 0;
     double edge = expected_edge(signal) - 2.0 * taker_fee_rate(manager, key);
-    if (manager->config.min_expected_edge > 0.0 && edge < manager->config.min_expected_edge) return 0;
+    if (manager->config.min_expected_edge > 0.0 && edge < manager->config.min_expected_edge && !signal->manage_positions_only) return 0;
     double trailing_stop_activation = 0.0;
     double trailing_stop_distance = 0.0;
     double trailing_stop_min_profit = 0.0;
@@ -909,6 +924,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
     time_t now = time(NULL);
     size_t idx = find_position(manager, signal->venue, signal->instrument);
     if (idx == (size_t)-1 || fabs(manager->positions[idx].size) <= 1e-9) {
+        if (signal->manage_positions_only) return 0;
         if (portfolio_budget < min_delta || !meets_minimum_position_size(manager, portfolio_budget)) return 0;
         if (idx == (size_t)-1) {
             if (manager->position_count >= GSC_MAX_POSITIONS) return 0;
@@ -928,7 +944,18 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
             return 0;
         }
     }
-    manager->positions[idx].confidence = target_confidence;
+    if (signal->manage_positions_only && signum(manager->positions[idx].size) == 0.0) return 0;
+    double context_confidence = target_confidence;
+    double override_sign = target_sign;
+    if (signal->manage_positions_only) {
+        if (signum(manager->positions[idx].size) != target_sign) {
+            override_sign = 0.0;
+        } else {
+            double current_confidence = clamp01(manager->positions[idx].confidence);
+            if (context_confidence > current_confidence) context_confidence = current_confidence;
+        }
+    }
+    manager->positions[idx].confidence = context_confidence;
     manager->positions[idx].last_signal_at = now;
     if (signal->price > 0.0) {
         manager->positions[idx].last_price = signal->price;
@@ -941,20 +968,22 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         manager->positions[idx].trailing_stop_distance = trailing_stop_distance;
         manager->positions[idx].trailing_stop_min_profit = trailing_stop_min_profit;
     }
-    manager->positions[idx].leverage = select_leverage(manager, key, target_confidence, edge, signal->score);
+    manager->positions[idx].leverage = select_leverage(manager, key, context_confidence, edge, signal->score);
 
     double weights[GSC_MAX_POSITIONS];
     double sides[GSC_MAX_POSITIONS];
     double edges[GSC_MAX_POSITIONS];
     double scores[GSC_MAX_POSITIONS];
+    int manage_only[GSC_MAX_POSITIONS];
     int active[GSC_MAX_POSITIONS];
     double targets[GSC_MAX_POSITIONS];
     for (size_t i = 0; i < manager->position_count; i++) {
         weights[i] = clamp01(manager->positions[i].confidence);
         sides[i] = signum(manager->positions[i].size);
-        if (i == idx) sides[i] = target_sign;
+        if (i == idx) sides[i] = override_sign;
         edges[i] = i == idx ? edge : 0.0;
         scores[i] = i == idx ? signal->score : 0.0;
+        manage_only[i] = i == idx ? signal->manage_positions_only : 0;
         active[i] = weights[i] > 1e-9 && sides[i] != 0.0;
         targets[i] = 0.0;
     }
@@ -1042,6 +1071,9 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
             }
             target = 0.0;
         }
+        if (manage_only[i]) {
+            target = manage_positions_only_target_size(manager->positions[i].size, target);
+        }
         double delta = target - manager->positions[i].size;
         int is_flip = is_flip_target(manager->positions[i].size, target);
         if (is_flip) delta = -manager->positions[i].size;
@@ -1076,6 +1108,7 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         candidate.trailing_stop_activation = i == idx ? trailing_stop_activation : 0.0;
         candidate.trailing_stop_distance = i == idx ? trailing_stop_distance : 0.0;
         candidate.trailing_stop_min_profit = i == idx ? trailing_stop_min_profit : 0.0;
+        candidate.manage_positions_only = manage_only[i];
         copy_text(candidate.reason, sizeof candidate.reason, reason);
         if (is_exposure_reduction(manager->positions[i].size, manager->positions[i].size + delta)) {
             if (reduction_count < GSC_MAX_ORDERS) reductions[reduction_count++] = candidate;
