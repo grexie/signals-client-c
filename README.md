@@ -2,6 +2,10 @@
 
 C99 client library for Grexie Signals websocket protocol events and production-style in-memory position management.
 
+## Grexie Signals - https://signals.grexie.com
+
+Grexie Signals is a real-time crypto trading signal service that streams model-backed market signals with portfolio-aware risk, sizing, and execution context for builders, bots, and trading tools.
+
 The C package intentionally keeps the transport pluggable: applications can connect with libwebsockets, curl, or an exchange gateway, then provide `gsc_send_fn` and `gsc_recv_fn` callbacks to `gsc_client_t`. The library owns subscription JSON, typed event parsing, and position-manager behavior.
 
 ## Build
