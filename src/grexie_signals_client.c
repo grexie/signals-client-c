@@ -237,6 +237,15 @@ void gsc_position_manager_init(gsc_position_manager_t *manager, gsc_position_man
         if (config.instruments[i].config.trailing_stop_min_profit < 0.0) config.instruments[i].config.trailing_stop_min_profit = 0.0;
     }
     manager->config = config;
+    if (config.initial_state) {
+        for (size_t i = 0; i < config.initial_state->position_count && i < GSC_MAX_POSITIONS; i++) {
+            const gsc_position_t *position = &config.initial_state->positions[i];
+            if (position->venue[0] == '\0' || position->instrument[0] == '\0' || fabs(position->size) <= 1e-9) continue;
+            manager->positions[manager->position_count] = *position;
+            if (manager->positions[manager->position_count].leverage <= 0.0) manager->positions[manager->position_count].leverage = manager->config.min_leverage;
+            manager->position_count++;
+        }
+    }
 }
 
 int gsc_asset_manager_update(gsc_asset_manager_t *manager, const gsc_asset_t *asset) {
@@ -352,6 +361,23 @@ static size_t find_position(gsc_position_manager_t *manager, const char *venue, 
     return (size_t)-1;
 }
 
+int gsc_position_manager_state(const gsc_position_manager_t *manager, gsc_position_manager_state_t *state) {
+    if (!manager || !state) return -1;
+    memset(state, 0, sizeof *state);
+    state->position_count = manager->position_count;
+    if (state->position_count > GSC_MAX_POSITIONS) state->position_count = GSC_MAX_POSITIONS;
+    for (size_t i = 0; i < state->position_count; i++) state->positions[i] = manager->positions[i];
+    return 0;
+}
+
+static void persist_manager(gsc_position_manager_t *manager) {
+    if (!manager || !manager->config.persist) return;
+    gsc_position_manager_state_t state;
+    if (gsc_position_manager_state(manager, &state) == 0) {
+        manager->config.persist(manager->config.persist_user, &state);
+    }
+}
+
 int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position) {
     size_t idx = find_position(manager, position->venue, position->instrument);
     if (idx == (size_t)-1) {
@@ -360,6 +386,7 @@ int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc
     }
     manager->positions[idx] = *position;
     if (manager->positions[idx].leverage <= 0.0) manager->positions[idx].leverage = manager->config.min_leverage;
+    persist_manager(manager);
     return 0;
 }
 
@@ -370,11 +397,18 @@ int gsc_position_manager_update_position(gsc_position_manager_t *manager, const 
 int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count) {
     if (!manager) return -1;
     manager->position_count = 0;
-    if (!positions) return 0;
+    if (!positions) {
+        persist_manager(manager);
+        return 0;
+    }
     for (size_t i = 0; i < position_count; i++) {
         if (positions[i].venue[0] == '\0' || positions[i].instrument[0] == '\0' || fabs(positions[i].size) <= 1e-9) continue;
-        if (gsc_position_manager_add_position(manager, &positions[i]) != 0) return -1;
+        if (manager->position_count >= GSC_MAX_POSITIONS) return -1;
+        manager->positions[manager->position_count] = positions[i];
+        if (manager->positions[manager->position_count].leverage <= 0.0) manager->positions[manager->position_count].leverage = manager->config.min_leverage;
+        manager->position_count++;
     }
+    persist_manager(manager);
     return 0;
 }
 
@@ -819,6 +853,7 @@ size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, cons
     make_order(manager, key, &position, -position.size, 0.0, 0.0, "closing", position.confidence, &orders[0]);
     if (!order_meets_minimum(&orders[0])) return 0;
     apply_delta(manager, key, idx, orders[0].size_delta, position.last_price > 0.0 ? position.last_price : position.entry_price, taker_fee_rate(manager, key), "closing");
+    persist_manager(manager);
     return 1;
 }
 
@@ -831,15 +866,22 @@ size_t gsc_position_manager_update_price(gsc_position_manager_t *manager, const 
     manager->positions[idx].last_price = price;
     update_excursion(&manager->positions[idx]);
     const char *reason = exit_reason(&manager->positions[idx], price);
-    if (!reason || reason[0] == '\0') return 0;
+    if (!reason || reason[0] == '\0') {
+        persist_manager(manager);
+        return 0;
+    }
     gsc_position_t position = manager->positions[idx];
     make_order(manager, key, &position, -position.size, 0.0, 0.0, reason, position.confidence, &orders[0]);
     double fee_rate = strcmp(reason, "take_profit") == 0 ? maker_fee_rate(manager, key) : taker_fee_rate(manager, key);
     orders[0].fee_rate = fee_rate;
     orders[0].estimated_fee = orders[0].notional * fee_rate;
     orders[0].estimated_fee_value = orders[0].notional * fee_rate;
-    if (!order_meets_minimum(&orders[0])) return 0;
+    if (!order_meets_minimum(&orders[0])) {
+        persist_manager(manager);
+        return 0;
+    }
     apply_delta(manager, key, idx, orders[0].size_delta, price, fee_rate, reason);
+    persist_manager(manager);
     return 1;
 }
 
@@ -1042,9 +1084,13 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
         }
     }
     if (reduction_count > 0) {
-        return materialize_candidates(manager, reductions, reduction_count, 0, orders, max_orders);
+        size_t count = materialize_candidates(manager, reductions, reduction_count, 0, orders, max_orders);
+        persist_manager(manager);
+        return count;
     }
-    return materialize_candidates(manager, openings, opening_count, 1, orders, max_orders);
+    size_t count = materialize_candidates(manager, openings, opening_count, 1, orders, max_orders);
+    persist_manager(manager);
+    return count;
 }
 
 gsc_position_stats_t gsc_position_manager_stats(const gsc_position_manager_t *manager) {

@@ -129,6 +129,9 @@ typedef struct {
     gsc_instrument_config_t config;
 } gsc_instrument_override_t;
 
+typedef struct gsc_position_manager_state_t gsc_position_manager_state_t;
+typedef void (*gsc_position_manager_persist_fn)(void *user, const gsc_position_manager_state_t *state);
+
 typedef struct {
     double max_margin_ratio;
     double position_size;
@@ -144,6 +147,9 @@ typedef struct {
     double executable_margin_buffer;
     gsc_instrument_override_t instruments[32];
     size_t instrument_count;
+    const gsc_position_manager_state_t *initial_state;
+    gsc_position_manager_persist_fn persist;
+    void *persist_user;
 } gsc_position_manager_config_t;
 
 typedef struct {
@@ -167,6 +173,11 @@ typedef struct {
     time_t opened_at;
     time_t last_signal_at;
 } gsc_position_t;
+
+struct gsc_position_manager_state_t {
+    gsc_position_t positions[GSC_MAX_POSITIONS];
+    size_t position_count;
+};
 
 typedef struct {
     char venue[GSC_MAX_TEXT];
@@ -236,6 +247,7 @@ int gsc_instrument_manager_update(gsc_instrument_manager_t *manager, const gsc_i
 int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position);
 int gsc_position_manager_update_position(gsc_position_manager_t *manager, const gsc_position_t *position);
 int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count);
+int gsc_position_manager_state(const gsc_position_manager_t *manager, gsc_position_manager_state_t *state);
 size_t gsc_position_manager_handle_event(gsc_position_manager_t *manager, const gsc_event_t *event, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const gsc_signal_t *signal, gsc_order_t *orders, size_t max_orders);
 size_t gsc_position_manager_update_price(gsc_position_manager_t *manager, const char *venue, const char *instrument, double price, gsc_order_t *orders, size_t max_orders);
