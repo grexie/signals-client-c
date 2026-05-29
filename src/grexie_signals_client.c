@@ -32,6 +32,14 @@ static int is_exposure_reduction(double previous_size, double target_size) {
     return fabs(target_size) < fabs(previous_size) - 1e-9;
 }
 
+static int should_suppress_flip_flop(const gsc_position_manager_t *manager, const gsc_position_t *position, const gsc_signal_t *signal, time_t now) {
+    if (!manager || !position || !signal) return 0;
+    if (manager->config.flip_flop_window_seconds <= 0 || position->last_signal_at <= 0) return 0;
+    if (now >= position->last_signal_at + manager->config.flip_flop_window_seconds) return 0;
+    if (manager->config.signal_flip_min_confidence <= 0.0) return 1;
+    return clamp01(signal->confidence) + 1e-12 < manager->config.signal_flip_min_confidence;
+}
+
 static void copy_text(char *dst, size_t dst_len, const char *src) {
     if (!dst || dst_len == 0) return;
     if (!src) src = "";
@@ -205,6 +213,8 @@ gsc_position_manager_config_t gsc_production_position_manager_config(void) {
     config.max_leverage = 1.0;
     config.available_margin_buffer = 0.10;
     config.executable_margin_buffer = 0.001;
+    config.flip_flop_window_seconds = 30 * 60;
+    config.signal_flip_min_confidence = 0.0;
     return config;
 }
 
@@ -227,6 +237,8 @@ void gsc_position_manager_init(gsc_position_manager_t *manager, gsc_position_man
     if (config.available_margin_buffer > 0.95) config.available_margin_buffer = 0.95;
     if (config.executable_margin_buffer < 0.0) config.executable_margin_buffer = 0.0;
     if (config.executable_margin_buffer > 0.05) config.executable_margin_buffer = 0.05;
+    if (config.flip_flop_window_seconds < 0) config.flip_flop_window_seconds = 0;
+    config.signal_flip_min_confidence = clamp01(config.signal_flip_min_confidence);
     for (size_t i = 0; i < config.instrument_count; i++) {
         if (config.instruments[i].config.maker_fee_rate < 0.0) config.instruments[i].config.maker_fee_rate = 0.0;
         if (config.instruments[i].config.taker_fee_rate < 0.0) config.instruments[i].config.taker_fee_rate = 0.0;
@@ -921,8 +933,9 @@ size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const
             manager->positions[idx].opened_at = time(NULL);
         }
     } else {
-        double is_flip = signum(manager->positions[idx].size) != 0.0 && signum(manager->positions[idx].size) != target_sign;
+        int is_flip = signum(manager->positions[idx].size) != 0.0 && signum(manager->positions[idx].size) != target_sign;
         int below_minimum = !meets_minimum_position_size(manager, position_margin(manager, key, &manager->positions[idx]));
+        if (is_flip && should_suppress_flip_flop(manager, &manager->positions[idx], signal, now)) return 0;
         if (!is_flip && !below_minimum && manager->config.rebalance_interval_seconds > 0 && manager->positions[idx].last_signal_at > 0 &&
             now < manager->positions[idx].last_signal_at + manager->config.rebalance_interval_seconds) {
             return 0;

@@ -145,6 +145,8 @@ typedef struct {
     double max_leverage;
     double available_margin_buffer;
     double executable_margin_buffer;
+    long flip_flop_window_seconds;
+    double signal_flip_min_confidence;
     gsc_instrument_override_t instruments[32];
     size_t instrument_count;
     const gsc_position_manager_state_t *initial_state;

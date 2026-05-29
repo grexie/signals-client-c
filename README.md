@@ -60,7 +60,7 @@ gsc_order_t orders[GSC_MAX_ORDERS];
 size_t count = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
 ```
 
-The manager mirrors production sizing: `max_margin_ratio` is the fraction of `AssetManager` capital that can be allocated as portfolio margin, `min_position_size_ratio` defaults to 1% of capital, positions are signed executable quantities/lots, and emitted orders include quantity, margin, notional, and fee estimates. It performs confidence-weighted rebalance, emits reductions/closes/first-phase flips before openings or increases, caps openings by live asset available exposure, scales `min_order_delta` by the max margin budget, handles opposite-side flips, accounts for fees in realized PnL, and selects leverage from confidence, fee-adjusted edge, and score.
+The manager mirrors production sizing: `max_margin_ratio` is the fraction of `AssetManager` capital that can be allocated as portfolio margin, `min_position_size_ratio` defaults to 1% of capital, positions are signed executable quantities/lots, and emitted orders include quantity, margin, notional, and fee estimates. It performs confidence-weighted rebalance, emits reductions/closes/first-phase flips before openings or increases, caps openings by live asset available exposure, scales `min_order_delta` by the max margin budget, suppresses opposite-side flipflops for the default 30-minute window, accounts for fees in realized PnL, and selects leverage from confidence, fee-adjusted edge, and score.
 
 `gsc_position_manager_handle_event` ignores replay signal events, and both event and signal handlers ignore live signals whose venue/instrument pair has not been configured in the manager's instrument manager.
 

@@ -57,6 +57,7 @@ static void test_position_manager_flip(void) {
     config.min_expected_edge = 0.0;
     config.min_order_delta = 0.20;
     config.max_leverage = 5.0;
+    config.flip_flop_window_seconds = 0;
     gsc_position_manager_t manager;
     gsc_position_manager_init(&manager, config);
     configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
@@ -93,6 +94,125 @@ static void test_position_manager_flip(void) {
     assert(n == 1);
     assert(orders[0].side == GSC_SIDE_SELL);
     assert(strcmp(orders[0].reason, "opening") == 0);
+}
+
+static void test_position_manager_suppresses_default_flip_flop(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.max_margin_ratio = 0.10;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    gsc_signal_t buy = {0};
+    snprintf(buy.venue, sizeof buy.venue, "okx");
+    snprintf(buy.instrument, sizeof buy.instrument, "BTC-USDT-SWAP");
+    buy.side = GSC_SIDE_BUY;
+    buy.confidence = 0.8;
+    buy.take_profit = 0.02;
+    buy.stop_loss = 0.004;
+    buy.price = 100.0;
+
+    size_t n = gsc_position_manager_handle_signal(&manager, &buy, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(manager.position_count == 1);
+    double opened_size = manager.positions[0].size;
+    time_t opened_signal_at = manager.positions[0].last_signal_at;
+    assert(opened_signal_at > 0);
+
+    gsc_signal_t sell = buy;
+    sell.side = GSC_SIDE_SELL;
+    sell.confidence = 0.99;
+    sell.price = 99.0;
+    n = gsc_position_manager_handle_signal(&manager, &sell, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+    assert(manager.position_count == 1);
+    assert(fabs(manager.positions[0].size - opened_size) < 1e-12);
+    assert(manager.positions[0].last_signal_at == opened_signal_at);
+}
+
+static void test_position_manager_allows_explicit_high_confidence_flip(void) {
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.max_margin_ratio = 0.10;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    config.signal_flip_min_confidence = 0.95;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    gsc_signal_t buy = {0};
+    snprintf(buy.venue, sizeof buy.venue, "okx");
+    snprintf(buy.instrument, sizeof buy.instrument, "BTC-USDT-SWAP");
+    buy.side = GSC_SIDE_BUY;
+    buy.confidence = 0.8;
+    buy.take_profit = 0.02;
+    buy.stop_loss = 0.004;
+    buy.price = 100.0;
+
+    size_t n = gsc_position_manager_handle_signal(&manager, &buy, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+
+    gsc_signal_t sell = buy;
+    sell.side = GSC_SIDE_SELL;
+    sell.confidence = 0.90;
+    sell.price = 99.0;
+    n = gsc_position_manager_handle_signal(&manager, &sell, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+
+    sell.confidence = 0.97;
+    n = gsc_position_manager_handle_signal(&manager, &sell, orders, GSC_MAX_ORDERS);
+    assert(n == 1);
+    assert(orders[0].side == GSC_SIDE_SELL);
+    assert(strcmp(orders[0].reason, "flip") == 0);
+    assert(fabs(orders[0].target_size) < 1e-9);
+}
+
+static void test_position_manager_persisted_state_suppresses_restart_flip(void) {
+    gsc_position_manager_state_t latest = {0};
+    gsc_position_manager_config_t config = gsc_production_position_manager_config();
+    config.max_margin_ratio = 0.10;
+    config.min_expected_edge = 0.0;
+    config.min_order_delta = 0.0;
+    config.persist = capture_position_manager_state;
+    config.persist_user = &latest;
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, config);
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    gsc_signal_t buy = {0};
+    snprintf(buy.venue, sizeof buy.venue, "okx");
+    snprintf(buy.instrument, sizeof buy.instrument, "BTC-USDT-SWAP");
+    buy.side = GSC_SIDE_BUY;
+    buy.confidence = 0.8;
+    buy.take_profit = 0.02;
+    buy.stop_loss = 0.004;
+    buy.price = 100.0;
+    assert(gsc_position_manager_handle_signal(&manager, &buy, orders, GSC_MAX_ORDERS) == 1);
+    assert(latest.position_count == 1);
+    assert(latest.positions[0].last_signal_at > 0);
+
+    gsc_position_manager_config_t hydrate_config = gsc_production_position_manager_config();
+    hydrate_config.max_margin_ratio = 0.10;
+    hydrate_config.min_expected_edge = 0.0;
+    hydrate_config.min_order_delta = 0.0;
+    hydrate_config.initial_state = &latest;
+    gsc_position_manager_t rehydrated;
+    gsc_position_manager_init(&rehydrated, hydrate_config);
+    configure_instrument(&rehydrated, "okx", "BTC-USDT-SWAP");
+
+    gsc_signal_t sell = buy;
+    sell.side = GSC_SIDE_SELL;
+    sell.confidence = 0.99;
+    sell.price = 99.0;
+    size_t n = gsc_position_manager_handle_signal(&rehydrated, &sell, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+    assert(rehydrated.position_count == 1);
+    assert(rehydrated.positions[0].last_signal_at == latest.positions[0].last_signal_at);
 }
 
 static void test_ignores_unconfigured_signals(void) {
@@ -413,6 +533,7 @@ static void test_persists_and_hydrates_trailing_stop_state(void) {
     assert(latest.position_count == 1);
     assert(fabs(latest.positions[0].trailing_stop_activation - 0.02) < 1e-9);
     assert(latest.positions[0].mfe > 0.039);
+    assert(latest.positions[0].last_signal_at > 0);
 
     gsc_position_manager_config_t hydrate_config = gsc_production_position_manager_config();
     hydrate_config.initial_state = &latest;
@@ -420,6 +541,7 @@ static void test_persists_and_hydrates_trailing_stop_state(void) {
     gsc_position_manager_init(&rehydrated, hydrate_config);
     assert(rehydrated.position_count == 1);
     assert(fabs(rehydrated.positions[0].mfe - latest.positions[0].mfe) < 1e-12);
+    assert(rehydrated.positions[0].last_signal_at == latest.positions[0].last_signal_at);
 }
 
 static void test_trailing_activation_is_at_least_breakeven(void) {
@@ -541,6 +663,9 @@ int main(void) {
     test_parse_signal();
     test_parse_info_and_error();
     test_position_manager_flip();
+    test_position_manager_suppresses_default_flip_flop();
+    test_position_manager_allows_explicit_high_confidence_flip();
+    test_position_manager_persisted_state_suppresses_restart_flip();
     test_ignores_unconfigured_signals();
     test_ignores_replay_events();
     test_leverage_adapts_with_confidence_edge_and_score();
