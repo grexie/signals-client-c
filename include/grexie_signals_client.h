@@ -246,6 +246,7 @@ gsc_position_manager_config_t gsc_production_position_manager_config(void);
 void gsc_position_manager_init(gsc_position_manager_t *manager, gsc_position_manager_config_t config);
 int gsc_asset_manager_update(gsc_asset_manager_t *manager, const gsc_asset_t *asset);
 int gsc_instrument_manager_update(gsc_instrument_manager_t *manager, const gsc_instrument_metadata_t *instrument);
+int gsc_instrument_manager_remove(gsc_instrument_manager_t *manager, const char *venue, const char *instrument);
 int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position);
 int gsc_position_manager_update_position(gsc_position_manager_t *manager, const gsc_position_t *position);
 int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count);

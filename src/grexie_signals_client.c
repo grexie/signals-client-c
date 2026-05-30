@@ -286,6 +286,21 @@ int gsc_instrument_manager_update(gsc_instrument_manager_t *manager, const gsc_i
     return 0;
 }
 
+int gsc_instrument_manager_remove(gsc_instrument_manager_t *manager, const char *venue, const char *instrument) {
+    if (!manager || !venue || !instrument || venue[0] == '\0' || instrument[0] == '\0') return -1;
+    for (size_t i = 0; i < manager->instrument_count; i++) {
+        if (strcmp(manager->instruments[i].venue, venue) == 0 && strcmp(manager->instruments[i].instrument, instrument) == 0) {
+            for (size_t j = i + 1; j < manager->instrument_count; j++) {
+                manager->instruments[j - 1] = manager->instruments[j];
+            }
+            manager->instrument_count--;
+            memset(&manager->instruments[manager->instrument_count], 0, sizeof manager->instruments[manager->instrument_count]);
+            return 0;
+        }
+    }
+    return 0;
+}
+
 static const gsc_asset_t *find_asset(const gsc_asset_manager_t *manager, const char *currency) {
     for (size_t i = 0; i < manager->asset_count; i++) {
         if (strcmp(manager->assets[i].currency, currency) == 0) return &manager->assets[i];

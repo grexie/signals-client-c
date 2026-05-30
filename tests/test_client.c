@@ -133,6 +133,26 @@ static void test_position_manager_suppresses_default_flip_flop(void) {
     assert(manager.positions[0].last_signal_at == opened_signal_at);
 }
 
+static void test_position_manager_ignores_removed_instrument(void) {
+    gsc_position_manager_t manager;
+    gsc_position_manager_init(&manager, gsc_production_position_manager_config());
+    configure_instrument(&manager, "okx", "BTC-USDT-SWAP");
+    assert(gsc_instrument_manager_remove(&manager.instruments, "okx", "BTC-USDT-SWAP") == 0);
+
+    gsc_order_t orders[GSC_MAX_ORDERS];
+    gsc_signal_t signal = {0};
+    snprintf(signal.venue, sizeof signal.venue, "okx");
+    snprintf(signal.instrument, sizeof signal.instrument, "BTC-USDT-SWAP");
+    signal.side = GSC_SIDE_BUY;
+    signal.confidence = 1.0;
+    signal.take_profit = 0.03;
+    signal.stop_loss = 0.01;
+    signal.price = 100.0;
+    size_t n = gsc_position_manager_handle_signal(&manager, &signal, orders, GSC_MAX_ORDERS);
+    assert(n == 0);
+    assert(manager.instruments.instrument_count == 0);
+}
+
 static void test_position_manager_allows_explicit_high_confidence_flip(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
     config.max_margin_ratio = 0.10;
@@ -664,6 +684,7 @@ int main(void) {
     test_parse_info_and_error();
     test_position_manager_flip();
     test_position_manager_suppresses_default_flip_flop();
+    test_position_manager_ignores_removed_instrument();
     test_position_manager_allows_explicit_high_confidence_flip();
     test_position_manager_persisted_state_suppresses_restart_flip();
     test_ignores_unconfigured_signals();
