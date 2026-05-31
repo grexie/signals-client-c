@@ -212,6 +212,7 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
     json_get_string(json, "intentId", event->intent_id, sizeof event->intent_id);
     json_get_string(json, "currency", event->currency, sizeof event->currency);
     json_get_string(json, "action", event->action, sizeof event->action);
+    json_get_string(json, "reason", event->reason, sizeof event->reason);
     json_get_string(json, "side", side, sizeof side);
     event->side = parse_side(side);
     event->replay = json_get_bool(json, "replay");

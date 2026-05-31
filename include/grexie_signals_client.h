@@ -76,6 +76,7 @@ typedef struct {
     char intent_id[GSC_MAX_TEXT];
     char currency[GSC_MAX_TEXT];
     char action[GSC_MAX_TEXT];
+    char reason[GSC_MAX_TEXT];
     int replay;
     gsc_side_t side;
     double contract_size;
