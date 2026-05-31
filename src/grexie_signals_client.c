@@ -128,10 +128,65 @@ int gsc_client_subscribe(gsc_client_t *client, const char *venue, const char *in
     return client && client->send ? client->send(client->user, json, (size_t)n) : -1;
 }
 
+int gsc_client_subscribe_basket(gsc_client_t *client, const char *venue, const char **instruments, size_t instrument_count, double profit_withdraw_ratio) {
+    char json[4096];
+    int n = snprintf(json, sizeof json, "{\"type\":\"subscribe\",\"venue\":\"%s\",\"instruments\":[", venue ? venue : "");
+    if (n < 0 || (size_t)n >= sizeof json) return -1;
+    for (size_t i = 0; i < instrument_count; i++) {
+        int wrote = snprintf(json + n, sizeof json - (size_t)n, "%s\"%s\"", i == 0 ? "" : ",", instruments && instruments[i] ? instruments[i] : "");
+        if (wrote < 0 || (size_t)wrote >= sizeof json - (size_t)n) return -1;
+        n += wrote;
+    }
+    int wrote = snprintf(json + n, sizeof json - (size_t)n, "],\"profitWithdrawRatio\":%.17g}", profit_withdraw_ratio);
+    if (wrote < 0 || (size_t)wrote >= sizeof json - (size_t)n) return -1;
+    n += wrote;
+    return client && client->send ? client->send(client->user, json, (size_t)n) : -1;
+}
+
 int gsc_client_unsubscribe(gsc_client_t *client, long subscription_id) {
     char json[128];
     int n = snprintf(json, sizeof json, "{\"type\":\"unsubscribe\",\"subscriptionId\":%ld}", subscription_id);
     return client && client->send ? client->send(client->user, json, (size_t)n) : -1;
+}
+
+int gsc_client_update_asset(gsc_client_t *client, long subscription_id, const gsc_asset_t *asset) {
+    if (!asset) return -1;
+    char json[1024];
+    int n = snprintf(json, sizeof json, "{\"type\":\"update-asset\",\"subscriptionId\":%ld,\"venue\":\"%s\",\"currency\":\"%s\",\"cash\":%.17g,\"available\":%.17g,\"used\":%.17g,\"equity\":%.17g,\"maxUsage\":%.17g}",
+        subscription_id, asset->venue, asset->currency, asset->cash, asset->available, asset->used, asset->equity, asset->max_usage);
+    return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
+}
+
+int gsc_client_update_position(gsc_client_t *client, long subscription_id, const gsc_position_t *position) {
+    if (!position) return -1;
+    char json[1536];
+    int n = snprintf(json, sizeof json, "{\"type\":\"update-position\",\"subscriptionId\":%ld,\"venue\":\"%s\",\"instrument\":\"%s\",\"status\":\"%s\",\"size\":%.17g,\"confidence\":%.17g,\"entryPrice\":%.17g,\"lastPrice\":%.17g,\"takeProfit\":%.17g,\"stopLoss\":%.17g,\"takeProfitPrice\":%.17g,\"stopLossPrice\":%.17g,\"leverage\":%.17g}",
+        subscription_id, position->venue, position->instrument, position->status, position->size, position->confidence, position->entry_price, position->last_price, position->take_profit, position->stop_loss, position->take_profit_price, position->stop_loss_price, position->leverage);
+    return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
+}
+
+int gsc_client_add_instrument(gsc_client_t *client, long subscription_id, const char *instrument) {
+    char json[256];
+    int n = snprintf(json, sizeof json, "{\"type\":\"add-instrument\",\"subscriptionId\":%ld,\"instrument\":\"%s\"}", subscription_id, instrument ? instrument : "");
+    return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
+}
+
+int gsc_client_remove_instrument(gsc_client_t *client, long subscription_id, const char *instrument) {
+    char json[256];
+    int n = snprintf(json, sizeof json, "{\"type\":\"remove-instrument\",\"subscriptionId\":%ld,\"instrument\":\"%s\"}", subscription_id, instrument ? instrument : "");
+    return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
+}
+
+int gsc_client_update_config(gsc_client_t *client, long subscription_id, double profit_withdraw_ratio) {
+    char json[256];
+    int n = snprintf(json, sizeof json, "{\"type\":\"update-config\",\"subscriptionId\":%ld,\"profitWithdrawRatio\":%.17g}", subscription_id, profit_withdraw_ratio);
+    return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
+}
+
+int gsc_client_schedule_withdrawal(gsc_client_t *client, long subscription_id, const char *currency, double amount, const char *reason) {
+    char json[512];
+    int n = snprintf(json, sizeof json, "{\"type\":\"schedule-withdrawal\",\"subscriptionId\":%ld,\"currency\":\"%s\",\"amount\":%.17g,\"reason\":\"%s\"}", subscription_id, currency ? currency : "", amount, reason ? reason : "");
+    return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
 }
 
 int gsc_client_receive(gsc_client_t *client, gsc_event_t *event) {
@@ -154,12 +209,28 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
     json_get_string(json, "instrument", event->instrument, sizeof event->instrument);
     json_get_string(json, "stage", event->stage, sizeof event->stage);
     json_get_string(json, "message", event->message, sizeof event->message);
+    json_get_string(json, "intentId", event->intent_id, sizeof event->intent_id);
+    json_get_string(json, "currency", event->currency, sizeof event->currency);
+    json_get_string(json, "action", event->action, sizeof event->action);
+    json_get_string(json, "side", side, sizeof side);
+    event->side = parse_side(side);
     event->replay = json_get_bool(json, "replay");
+    event->contract_size = json_get_double(json, "contractSize", 0.0);
+    event->leverage = json_get_double(json, "leverage", 0.0);
+    event->reduce_only = json_get_bool(json, "reduceOnly");
+    event->take_profit = json_get_double(json, "takeProfit", 0.0);
+    event->stop_loss = json_get_double(json, "stopLoss", 0.0);
+    event->take_profit_price = json_get_double(json, "takeProfitPrice", 0.0);
+    event->stop_loss_price = json_get_double(json, "stopLossPrice", 0.0);
+    event->amount = json_get_double(json, "amount", 0.0);
     if (strcmp(type, "ready") == 0) event->type = GSC_EVENT_READY;
     else if (strcmp(type, "subscribed") == 0) event->type = GSC_EVENT_SUBSCRIBED;
     else if (strcmp(type, "unsubscribed") == 0) event->type = GSC_EVENT_UNSUBSCRIBED;
     else if (strcmp(type, "info") == 0) event->type = GSC_EVENT_INFO;
     else if (strcmp(type, "error") == 0) event->type = GSC_EVENT_ERROR;
+    else if (strcmp(type, "create-market-order") == 0) event->type = GSC_EVENT_CREATE_MARKET_ORDER;
+    else if (strcmp(type, "update-tpsl") == 0) event->type = GSC_EVENT_UPDATE_TPSL;
+    else if (strcmp(type, "withdraw") == 0) event->type = GSC_EVENT_WITHDRAW;
     else if (strcmp(type, "signal") == 0) {
         event->type = GSC_EVENT_SIGNAL;
         copy_text(event->signal.venue, sizeof event->signal.venue, event->venue);
@@ -354,7 +425,8 @@ static double available_exposure_budget(const gsc_position_manager_t *manager, c
     const gsc_asset_t *asset = find_asset(&manager->assets, currency);
     if (!asset) return portfolio_budget;
     if (asset->available <= 0.0) return 0.0;
-    double budget = fmax(0.0, asset->available);
+    double max_usage = asset->max_usage > 0.0 ? clamp01(asset->max_usage) : 1.0;
+    double budget = fmax(0.0, asset->available) * max_usage;
     if (manager->config.available_margin_buffer > 0.0) budget *= 1.0 - manager->config.available_margin_buffer;
     return fmin(budget, portfolio_budget);
 }
@@ -405,8 +477,17 @@ static void persist_manager(gsc_position_manager_t *manager) {
     }
 }
 
+static void remove_position(gsc_position_manager_t *manager, size_t idx);
+
 int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position) {
     size_t idx = find_position(manager, position->venue, position->instrument);
+    if ((position->status[0] != '\0' && strcmp(position->status, "closed") == 0) || fabs(position->size) <= 1e-9) {
+        if (idx != (size_t)-1) {
+            remove_position(manager, idx);
+            persist_manager(manager);
+        }
+        return 0;
+    }
     if (idx == (size_t)-1) {
         if (manager->position_count >= GSC_MAX_POSITIONS) return -1;
         idx = manager->position_count++;
@@ -477,18 +558,22 @@ static void update_excursion(gsc_position_t *position) {
 }
 
 static int take_profit_triggered(const gsc_position_t *position, double price) {
-    if (!position || position->entry_price <= 0.0 || position->take_profit <= 0.0 || price <= 0.0) return 0;
-    double target = position->size < 0.0
+    if (!position || position->entry_price <= 0.0 || price <= 0.0) return 0;
+    double target = position->take_profit_price;
+    if (target <= 0.0 && position->take_profit > 0.0) target = position->size < 0.0
         ? position->entry_price * (1.0 - position->take_profit)
         : position->entry_price * (1.0 + position->take_profit);
+    if (target <= 0.0) return 0;
     return position->size < 0.0 ? price <= target : price >= target;
 }
 
 static int stop_loss_triggered(const gsc_position_t *position, double price) {
-    if (!position || position->entry_price <= 0.0 || position->stop_loss <= 0.0 || price <= 0.0) return 0;
-    double target = position->size < 0.0
+    if (!position || position->entry_price <= 0.0 || price <= 0.0) return 0;
+    double target = position->stop_loss_price;
+    if (target <= 0.0 && position->stop_loss > 0.0) target = position->size < 0.0
         ? position->entry_price * (1.0 + position->stop_loss)
         : position->entry_price * (1.0 - position->stop_loss);
+    if (target <= 0.0) return 0;
     return position->size < 0.0 ? price >= target : price <= target;
 }
 

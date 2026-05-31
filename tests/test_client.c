@@ -51,6 +51,39 @@ static void test_parse_info_and_error(void) {
     assert(strcmp(event.message, "no access") == 0);
 }
 
+static void test_parse_router_events(void) {
+    gsc_event_t event;
+    int rc = gsc_parse_event("{\"type\":\"create-market-order\",\"subscriptionId\":7,\"intentId\":\"intent_1\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"action\":\"enter\",\"side\":\"buy\",\"contractSize\":2,\"leverage\":3,\"reduceOnly\":true,\"takeProfitPrice\":105.5,\"stopLossPrice\":97.2,\"takeProfit\":0.055,\"stopLoss\":0.028}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_CREATE_MARKET_ORDER);
+    assert(event.subscription_id == 7);
+    assert(strcmp(event.intent_id, "intent_1") == 0);
+    assert(strcmp(event.action, "enter") == 0);
+    assert(event.side == GSC_SIDE_BUY);
+    assert(fabs(event.contract_size - 2.0) < 1e-9);
+    assert(fabs(event.leverage - 3.0) < 1e-9);
+    assert(event.reduce_only == 1);
+    assert(fabs(event.take_profit_price - 105.5) < 1e-9);
+    assert(fabs(event.stop_loss_price - 97.2) < 1e-9);
+    assert(fabs(event.take_profit - 0.055) < 1e-9);
+    assert(fabs(event.stop_loss - 0.028) < 1e-9);
+
+    rc = gsc_parse_event("{\"type\":\"update-tpsl\",\"subscriptionId\":7,\"intentId\":\"tpsl_1\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"side\":\"sell\",\"takeProfitPrice\":101.5,\"stopLossPrice\":99.2,\"takeProfit\":0.02,\"stopLoss\":0.01}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_UPDATE_TPSL);
+    assert(event.side == GSC_SIDE_SELL);
+    assert(fabs(event.take_profit_price - 101.5) < 1e-9);
+    assert(fabs(event.stop_loss_price - 99.2) < 1e-9);
+    assert(fabs(event.take_profit - 0.02) < 1e-9);
+    assert(fabs(event.stop_loss - 0.01) < 1e-9);
+
+    rc = gsc_parse_event("{\"type\":\"withdraw\",\"subscriptionId\":7,\"intentId\":\"withdraw_1\",\"venue\":\"okx\",\"currency\":\"USDT\",\"amount\":42}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_WITHDRAW);
+    assert(strcmp(event.currency, "USDT") == 0);
+    assert(fabs(event.amount - 42.0) < 1e-9);
+}
+
 static void test_position_manager_flip(void) {
     gsc_position_manager_config_t config = gsc_production_position_manager_config();
     config.max_margin_ratio = 0.10;
@@ -682,6 +715,7 @@ static void test_closes_position_below_minimum_position_size_ratio(void) {
 int main(void) {
     test_parse_signal();
     test_parse_info_and_error();
+    test_parse_router_events();
     test_position_manager_flip();
     test_position_manager_suppresses_default_flip_flop();
     test_position_manager_ignores_removed_instrument();

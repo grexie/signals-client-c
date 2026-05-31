@@ -24,6 +24,9 @@ typedef enum {
     GSC_EVENT_UNSUBSCRIBED,
     GSC_EVENT_INFO,
     GSC_EVENT_SIGNAL,
+    GSC_EVENT_CREATE_MARKET_ORDER,
+    GSC_EVENT_UPDATE_TPSL,
+    GSC_EVENT_WITHDRAW,
     GSC_EVENT_ERROR,
     GSC_EVENT_UNKNOWN
 } gsc_event_type_t;
@@ -70,7 +73,19 @@ typedef struct {
     char instrument[GSC_MAX_TEXT];
     char stage[GSC_MAX_TEXT];
     char message[256];
+    char intent_id[GSC_MAX_TEXT];
+    char currency[GSC_MAX_TEXT];
+    char action[GSC_MAX_TEXT];
     int replay;
+    gsc_side_t side;
+    double contract_size;
+    double leverage;
+    int reduce_only;
+    double take_profit;
+    double stop_loss;
+    double take_profit_price;
+    double stop_loss_price;
+    double amount;
     gsc_signal_t signal;
 } gsc_event_t;
 
@@ -95,11 +110,13 @@ typedef struct {
 } gsc_instrument_config_t;
 
 typedef struct {
+    char venue[GSC_MAX_TEXT];
     char currency[GSC_MAX_TEXT];
     double cash;
     double available;
     double used;
     double equity;
+    double max_usage;
 } gsc_asset_t;
 
 typedef struct {
@@ -157,12 +174,15 @@ typedef struct {
 typedef struct {
     char venue[GSC_MAX_TEXT];
     char instrument[GSC_MAX_TEXT];
+    char status[GSC_MAX_TEXT];
     double size;
     double confidence;
     double entry_price;
     double last_price;
     double take_profit;
     double stop_loss;
+    double take_profit_price;
+    double stop_loss_price;
     double trailing_stop_activation;
     double trailing_stop_distance;
     double trailing_stop_min_profit;
@@ -237,7 +257,14 @@ typedef struct {
 
 void gsc_client_init(gsc_client_t *client, const char *token, gsc_send_fn send_fn, gsc_recv_fn recv_fn, void *user);
 int gsc_client_subscribe(gsc_client_t *client, const char *venue, const char *instrument);
+int gsc_client_subscribe_basket(gsc_client_t *client, const char *venue, const char **instruments, size_t instrument_count, double profit_withdraw_ratio);
 int gsc_client_unsubscribe(gsc_client_t *client, long subscription_id);
+int gsc_client_update_asset(gsc_client_t *client, long subscription_id, const gsc_asset_t *asset);
+int gsc_client_update_position(gsc_client_t *client, long subscription_id, const gsc_position_t *position);
+int gsc_client_add_instrument(gsc_client_t *client, long subscription_id, const char *instrument);
+int gsc_client_remove_instrument(gsc_client_t *client, long subscription_id, const char *instrument);
+int gsc_client_update_config(gsc_client_t *client, long subscription_id, double profit_withdraw_ratio);
+int gsc_client_schedule_withdrawal(gsc_client_t *client, long subscription_id, const char *currency, double amount, const char *reason);
 int gsc_client_receive(gsc_client_t *client, gsc_event_t *event);
 
 int gsc_parse_event(const char *json, gsc_event_t *event);
