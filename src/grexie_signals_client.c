@@ -228,6 +228,10 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
     else if (strcmp(type, "subscribed") == 0) event->type = GSC_EVENT_SUBSCRIBED;
     else if (strcmp(type, "unsubscribed") == 0) event->type = GSC_EVENT_UNSUBSCRIBED;
     else if (strcmp(type, "info") == 0) event->type = GSC_EVENT_INFO;
+    else if (strcmp(type, "backtest") == 0) {
+        event->type = GSC_EVENT_BACKTEST;
+        copy_text(event->backtest, sizeof event->backtest, json);
+    }
     else if (strcmp(type, "error") == 0) event->type = GSC_EVENT_ERROR;
     else if (strcmp(type, "create-market-order") == 0) event->type = GSC_EVENT_CREATE_MARKET_ORDER;
     else if (strcmp(type, "update-tpsl") == 0) event->type = GSC_EVENT_UPDATE_TPSL;

@@ -45,6 +45,12 @@ static void test_parse_info_and_error(void) {
     assert(strcmp(event.stage, "ready") == 0);
     assert(event.replay == 1);
 
+    rc = gsc_parse_event("{\"type\":\"backtest\",\"subscriptionId\":3,\"venue\":\"okx\",\"instrument\":\"BASKET:1\",\"backtest\":{\"accepted\":true}}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_BACKTEST);
+    assert(event.subscription_id == 3);
+    assert(strstr(event.backtest, "\"accepted\":true") != NULL);
+
     rc = gsc_parse_event("{\"type\":\"error\",\"code\":\"forbidden\",\"message\":\"no access\"}", &event);
     assert(rc == 0);
     assert(event.type == GSC_EVENT_ERROR);

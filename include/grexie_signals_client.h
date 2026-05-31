@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 #define GSC_MAX_TEXT 96
+#define GSC_MAX_BACKTEST_JSON 2048
 #define GSC_MAX_POSITIONS 128
 #define GSC_MAX_ORDERS 128
 
@@ -23,6 +24,7 @@ typedef enum {
     GSC_EVENT_SUBSCRIBED,
     GSC_EVENT_UNSUBSCRIBED,
     GSC_EVENT_INFO,
+    GSC_EVENT_BACKTEST,
     GSC_EVENT_SIGNAL,
     GSC_EVENT_CREATE_MARKET_ORDER,
     GSC_EVENT_UPDATE_TPSL,
@@ -73,6 +75,7 @@ typedef struct {
     char instrument[GSC_MAX_TEXT];
     char stage[GSC_MAX_TEXT];
     char message[256];
+    char backtest[GSC_MAX_BACKTEST_JSON];
     char intent_id[GSC_MAX_TEXT];
     char currency[GSC_MAX_TEXT];
     char action[GSC_MAX_TEXT];
