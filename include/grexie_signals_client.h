@@ -81,6 +81,7 @@ typedef struct {
     long subscription_id;
     char venue[GSC_MAX_TEXT];
     char instrument[GSC_MAX_TEXT];
+    char level[GSC_MAX_TEXT];
     char stage[GSC_MAX_TEXT];
     char message[256];
     char backtest[GSC_MAX_BACKTEST_JSON];

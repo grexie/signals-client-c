@@ -36,11 +36,16 @@ static void test_parse_signal(void) {
 
 static void test_parse_info_and_error(void) {
     gsc_event_t event;
-    int rc = gsc_parse_event("{\"type\":\"info\",\"subscriptionId\":3,\"venue\":\"okx\",\"instrument\":\"DOGE-USDT-SWAP\",\"stage\":\"ready\",\"message\":\"ready\",\"replay\":true}", &event);
+    int rc = gsc_parse_event("{\"type\":\"info\",\"subscriptionId\":3,\"venue\":\"okx\",\"instrument\":\"DOGE-USDT-SWAP\",\"level\":\"debug\",\"stage\":\"ready\",\"message\":\"ready\",\"replay\":true}", &event);
     assert(rc == 0);
     assert(event.type == GSC_EVENT_INFO);
+    assert(strcmp(event.level, "debug") == 0);
     assert(strcmp(event.stage, "ready") == 0);
     assert(event.replay == 1);
+    rc = gsc_parse_event("{\"type\":\"info\",\"subscriptionId\":3,\"venue\":\"okx\",\"instrument\":\"DOGE-USDT-SWAP\",\"stage\":\"ready\",\"message\":\"ready\"}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_INFO);
+    assert(strcmp(event.level, "info") == 0);
 
     rc = gsc_parse_event("{\"type\":\"backtest\",\"subscriptionId\":3,\"venue\":\"okx\",\"instrument\":\"BASKET:1\",\"backtest\":{\"accepted\":true}}", &event);
     assert(rc == 0);

@@ -286,6 +286,10 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
     event->subscription_id = json_get_long(json, "subscriptionId", 0);
     json_get_string(json, "venue", event->venue, sizeof event->venue);
     json_get_string(json, "instrument", event->instrument, sizeof event->instrument);
+    json_get_string(json, "level", event->level, sizeof event->level);
+    if (strcmp(event->level, "error") != 0 && strcmp(event->level, "warn") != 0 && strcmp(event->level, "debug") != 0) {
+        copy_text(event->level, sizeof event->level, "info");
+    }
     json_get_string(json, "stage", event->stage, sizeof event->stage);
     json_get_string(json, "message", event->message, sizeof event->message);
     json_get_string(json, "intentId", event->intent_id, sizeof event->intent_id);
