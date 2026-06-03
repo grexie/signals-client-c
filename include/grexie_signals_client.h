@@ -11,7 +11,8 @@ extern "C" {
 #define GSC_MAX_TEXT 96
 #define GSC_MAX_BACKTEST_JSON 2048
 #define GSC_MAX_POSITIONS 128
-#define GSC_MAX_ORDERS 128
+#define GSC_MAX_ASSETS 32
+#define GSC_MAX_INSTRUMENTS 128
 
 typedef enum {
     GSC_SIDE_NONE = 0,
@@ -104,16 +105,6 @@ typedef struct {
 } gsc_client_t;
 
 typedef struct {
-    double maker_fee_rate;
-    double taker_fee_rate;
-    double min_leverage;
-    double max_leverage;
-    double trailing_stop_activation;
-    double trailing_stop_distance;
-    double trailing_stop_min_profit;
-} gsc_instrument_config_t;
-
-typedef struct {
     char venue[GSC_MAX_TEXT];
     char currency[GSC_MAX_TEXT];
     double cash;
@@ -122,58 +113,6 @@ typedef struct {
     double equity;
     double max_usage;
 } gsc_asset_t;
-
-typedef struct {
-    gsc_asset_t assets[32];
-    size_t asset_count;
-} gsc_asset_manager_t;
-
-typedef struct {
-    char venue[GSC_MAX_TEXT];
-    char instrument[GSC_MAX_TEXT];
-    char settlement_currency[GSC_MAX_TEXT];
-    double lot_size;
-    double min_size;
-    double tick_size;
-    double contract_value;
-    double contract_multiplier;
-    double max_leverage;
-} gsc_instrument_metadata_t;
-
-typedef struct {
-    gsc_instrument_metadata_t instruments[128];
-    size_t instrument_count;
-} gsc_instrument_manager_t;
-
-typedef struct {
-    char key[GSC_MAX_TEXT * 2];
-    gsc_instrument_config_t config;
-} gsc_instrument_override_t;
-
-typedef struct gsc_position_manager_state_t gsc_position_manager_state_t;
-typedef void (*gsc_position_manager_persist_fn)(void *user, const gsc_position_manager_state_t *state);
-
-typedef struct {
-    double max_margin_ratio;
-    double position_size;
-    double min_expected_edge;
-    double min_order_delta;
-    double min_position_size_ratio;
-    long rebalance_interval_seconds;
-    double maker_fee_rate;
-    double taker_fee_rate;
-    double min_leverage;
-    double max_leverage;
-    double available_margin_buffer;
-    double executable_margin_buffer;
-    long flip_flop_window_seconds;
-    double signal_flip_min_confidence;
-    gsc_instrument_override_t instruments[32];
-    size_t instrument_count;
-    const gsc_position_manager_state_t *initial_state;
-    gsc_position_manager_persist_fn persist;
-    void *persist_user;
-} gsc_position_manager_config_t;
 
 typedef struct {
     char venue[GSC_MAX_TEXT];
@@ -200,64 +139,29 @@ typedef struct {
     time_t last_signal_at;
 } gsc_position_t;
 
-struct gsc_position_manager_state_t {
+typedef struct {
+    gsc_asset_t assets[GSC_MAX_ASSETS];
+    size_t asset_count;
     gsc_position_t positions[GSC_MAX_POSITIONS];
     size_t position_count;
-};
+} gsc_signals_manager_state_t;
 
 typedef struct {
     char venue[GSC_MAX_TEXT];
-    char instrument[GSC_MAX_TEXT];
-    gsc_side_t side;
-    char reason[32];
-    double size_delta;
-    double previous_size;
-    double target_size;
-    double price;
-    double confidence;
-    double score;
-    double expected_edge;
-    double fee_rate;
-    double estimated_fee;
-    double estimated_fee_value;
-    double margin;
-    double quantity;
-    double notional;
-    char settlement_currency[GSC_MAX_TEXT];
-    double min_size;
-    double lot_size;
-    double tick_size;
-    double leverage;
-    double take_profit;
-    double stop_loss;
-    double trailing_stop_activation;
-    double trailing_stop_distance;
-    double trailing_stop_min_profit;
-    double exit_move;
-    double mfe;
-    double mae;
-    int reduce_only;
-} gsc_order_t;
+    char instruments[GSC_MAX_INSTRUMENTS][GSC_MAX_TEXT];
+    size_t instrument_count;
+    double profit_withdraw_ratio;
+} gsc_signals_manager_config_t;
 
 typedef struct {
-    gsc_position_manager_config_t config;
-    gsc_asset_manager_t assets;
-    gsc_instrument_manager_t instruments;
+    gsc_client_t *client;
+    gsc_signals_manager_config_t config;
+    long subscription_id;
+    gsc_asset_t assets[GSC_MAX_ASSETS];
+    size_t asset_count;
     gsc_position_t positions[GSC_MAX_POSITIONS];
     size_t position_count;
-} gsc_position_manager_t;
-
-typedef struct {
-    double equity;
-    double available;
-    double used;
-    double realized_pnl;
-    double unrealized_pnl;
-    double fees;
-    double realized_pnl_percent;
-    double unrealized_pnl_percent;
-    double total_pnl_percent;
-} gsc_position_stats_t;
+} gsc_signals_manager_t;
 
 void gsc_client_init(gsc_client_t *client, const char *token, gsc_send_fn send_fn, gsc_recv_fn recv_fn, void *user);
 int gsc_client_subscribe(gsc_client_t *client, const char *venue, const char *instrument);
@@ -272,21 +176,20 @@ int gsc_client_schedule_withdrawal(gsc_client_t *client, long subscription_id, c
 int gsc_client_receive(gsc_client_t *client, gsc_event_t *event);
 
 int gsc_parse_event(const char *json, gsc_event_t *event);
+gsc_side_t gsc_position_side(const gsc_position_t *position);
+double gsc_position_unrealized_pnl(const gsc_position_t *position);
 
-gsc_position_manager_config_t gsc_production_position_manager_config(void);
-void gsc_position_manager_init(gsc_position_manager_t *manager, gsc_position_manager_config_t config);
-int gsc_asset_manager_update(gsc_asset_manager_t *manager, const gsc_asset_t *asset);
-int gsc_instrument_manager_update(gsc_instrument_manager_t *manager, const gsc_instrument_metadata_t *instrument);
-int gsc_instrument_manager_remove(gsc_instrument_manager_t *manager, const char *venue, const char *instrument);
-int gsc_position_manager_add_position(gsc_position_manager_t *manager, const gsc_position_t *position);
-int gsc_position_manager_update_position(gsc_position_manager_t *manager, const gsc_position_t *position);
-int gsc_position_manager_replace_positions(gsc_position_manager_t *manager, const gsc_position_t *positions, size_t position_count);
-int gsc_position_manager_state(const gsc_position_manager_t *manager, gsc_position_manager_state_t *state);
-size_t gsc_position_manager_handle_event(gsc_position_manager_t *manager, const gsc_event_t *event, gsc_order_t *orders, size_t max_orders);
-size_t gsc_position_manager_handle_signal(gsc_position_manager_t *manager, const gsc_signal_t *signal, gsc_order_t *orders, size_t max_orders);
-size_t gsc_position_manager_update_price(gsc_position_manager_t *manager, const char *venue, const char *instrument, double price, gsc_order_t *orders, size_t max_orders);
-size_t gsc_position_manager_close_position(gsc_position_manager_t *manager, const char *venue, const char *instrument, gsc_order_t *orders, size_t max_orders);
-gsc_position_stats_t gsc_position_manager_stats(const gsc_position_manager_t *manager);
+void gsc_signals_manager_init(gsc_signals_manager_t *manager, gsc_client_t *client, const gsc_signals_manager_state_t *state, const gsc_signals_manager_config_t *config);
+int gsc_signals_manager_subscribe(gsc_signals_manager_t *manager);
+int gsc_signals_manager_handle_event(gsc_signals_manager_t *manager, const gsc_event_t *event);
+int gsc_signals_manager_update_asset(gsc_signals_manager_t *manager, const gsc_asset_t *asset);
+int gsc_signals_manager_update_position(gsc_signals_manager_t *manager, const gsc_position_t *position);
+int gsc_signals_manager_add_instrument(gsc_signals_manager_t *manager, const char *instrument);
+int gsc_signals_manager_remove_instrument(gsc_signals_manager_t *manager, const char *instrument);
+int gsc_signals_manager_update_config(gsc_signals_manager_t *manager, double profit_withdraw_ratio);
+int gsc_signals_manager_schedule_withdrawal(gsc_signals_manager_t *manager, const char *currency, double amount, const char *reason);
+int gsc_signals_manager_state(const gsc_signals_manager_t *manager, gsc_signals_manager_state_t *state);
+double gsc_signals_manager_available_order_cash(const gsc_signals_manager_t *manager, const char *currency);
 
 #ifdef __cplusplus
 }
