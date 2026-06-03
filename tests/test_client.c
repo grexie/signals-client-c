@@ -55,7 +55,18 @@ static void test_parse_info_and_error(void) {
 
 static void test_parse_router_events(void) {
     gsc_event_t event;
-    int rc = gsc_parse_event("{\"type\":\"create-market-order\",\"subscriptionId\":7,\"intentId\":\"intent_1\",\"reason\":\"preempted_by_better_route\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"action\":\"enter\",\"side\":\"buy\",\"contractSize\":2,\"margin\":125.5,\"leverage\":3,\"confidence\":0.73,\"reduceOnly\":true,\"takeProfitPrice\":105.5,\"stopLossPrice\":97.2,\"takeProfit\":0.055,\"stopLoss\":0.028}", &event);
+    int rc = gsc_parse_event("{\"type\":\"basket_updated\",\"subscriptionId\":7,\"venue\":\"okx\",\"message\":\"active\"}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_BASKET_UPDATED);
+    assert(event.subscription_id == 7);
+    assert(strcmp(event.venue, "okx") == 0);
+
+    rc = gsc_parse_event("{\"type\":\"order_router_forwarded\",\"subscriptionId\":7}", &event);
+    assert(rc == 0);
+    assert(event.type == GSC_EVENT_ORDER_ROUTER_FORWARDED);
+    assert(event.subscription_id == 7);
+
+    rc = gsc_parse_event("{\"type\":\"create-market-order\",\"subscriptionId\":7,\"intentId\":\"intent_1\",\"reason\":\"preempted_by_better_route\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"action\":\"enter\",\"side\":\"buy\",\"contractSize\":2,\"margin\":125.5,\"leverage\":3,\"confidence\":0.73,\"reduceOnly\":true,\"takeProfitPrice\":105.5,\"stopLossPrice\":97.2,\"takeProfit\":0.055,\"stopLoss\":0.028}", &event);
     assert(rc == 0);
     assert(event.type == GSC_EVENT_CREATE_MARKET_ORDER);
     assert(event.subscription_id == 7);

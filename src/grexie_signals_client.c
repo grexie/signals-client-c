@@ -267,9 +267,14 @@ int gsc_client_receive(gsc_client_t *client, gsc_event_t *event) {
     char buffer[8192];
     size_t received = 0;
     if (!client || !client->recv) return -1;
-    if (client->recv(client->user, buffer, sizeof buffer - 1, &received) != 0) return -1;
-    buffer[received] = '\0';
-    return gsc_parse_event(buffer, event);
+    for (;;) {
+        char type[32] = {0};
+        if (client->recv(client->user, buffer, sizeof buffer - 1, &received) != 0) return -1;
+        buffer[received] = '\0';
+        json_get_string(buffer, "type", type, sizeof type);
+        if (strcmp(type, "basket_state") == 0) continue;
+        return gsc_parse_event(buffer, event);
+    }
 }
 
 int gsc_parse_event(const char *json, gsc_event_t *event) {
@@ -303,6 +308,8 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
     if (strcmp(type, "ready") == 0) event->type = GSC_EVENT_READY;
     else if (strcmp(type, "subscribed") == 0) event->type = GSC_EVENT_SUBSCRIBED;
     else if (strcmp(type, "unsubscribed") == 0) event->type = GSC_EVENT_UNSUBSCRIBED;
+    else if (strcmp(type, "basket_updated") == 0) event->type = GSC_EVENT_BASKET_UPDATED;
+    else if (strcmp(type, "order_router_forwarded") == 0) event->type = GSC_EVENT_ORDER_ROUTER_FORWARDED;
     else if (strcmp(type, "info") == 0) event->type = GSC_EVENT_INFO;
     else if (strcmp(type, "backtest") == 0) {
         event->type = GSC_EVENT_BACKTEST;
