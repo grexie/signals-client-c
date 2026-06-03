@@ -18,6 +18,58 @@ static double positive_or(double first, double second) {
     return second > 0.0 ? second : 0.0;
 }
 
+gsc_risk_config_t gsc_default_risk_config(void) {
+    gsc_risk_config_t risk;
+    memset(&risk, 0, sizeof risk);
+    risk.max_margin_ratio = 1.0;
+    return risk;
+}
+
+gsc_runtime_config_t gsc_runtime_config_from_profit_withdraw_ratio(double profit_withdraw_ratio) {
+    gsc_runtime_config_t config;
+    memset(&config, 0, sizeof config);
+    config.profit_withdraw_ratio = profit_withdraw_ratio;
+    return config;
+}
+
+static gsc_risk_config_t normalize_risk_config(gsc_risk_config_t risk) {
+    risk.max_margin_ratio = clamp01(positive_or(risk.max_margin_ratio, 1.0));
+    if (!isfinite(risk.min_lot_haircut_ratio) || risk.min_lot_haircut_ratio < 0.0) risk.min_lot_haircut_ratio = 0.0;
+    if (risk.max_concurrent_positions < 0) risk.max_concurrent_positions = 0;
+    if (!isfinite(risk.max_drawdown) || risk.max_drawdown < 0.0) risk.max_drawdown = 0.0;
+    if (!isfinite(risk.switch_buffer) || risk.switch_buffer < 0.0) risk.switch_buffer = 0.0;
+    if (!isfinite(risk.min_leverage) || risk.min_leverage < 0.0) risk.min_leverage = 0.0;
+    if (!isfinite(risk.max_leverage) || risk.max_leverage < 0.0) risk.max_leverage = 0.0;
+    if (risk.max_leverage > 0.0 && risk.min_leverage > risk.max_leverage) risk.min_leverage = risk.max_leverage;
+    risk.profit_withdraw_ratio = clamp01(risk.profit_withdraw_ratio);
+    return risk;
+}
+
+static gsc_runtime_config_t normalize_runtime_config(gsc_runtime_config_t config) {
+    config.max_margin_ratio = clamp01(config.max_margin_ratio);
+    if (!isfinite(config.min_lot_haircut_ratio) || config.min_lot_haircut_ratio < 0.0) config.min_lot_haircut_ratio = 0.0;
+    if (config.max_concurrent_positions < 0) config.max_concurrent_positions = 0;
+    if (!isfinite(config.max_drawdown) || config.max_drawdown < 0.0) config.max_drawdown = 0.0;
+    if (!isfinite(config.switch_buffer) || config.switch_buffer < 0.0) config.switch_buffer = 0.0;
+    if (!isfinite(config.min_leverage) || config.min_leverage < 0.0) config.min_leverage = 0.0;
+    if (!isfinite(config.max_leverage) || config.max_leverage < 0.0) config.max_leverage = 0.0;
+    if (config.max_leverage > 0.0 && config.min_leverage > config.max_leverage) config.min_leverage = config.max_leverage;
+    config.profit_withdraw_ratio = clamp01(config.profit_withdraw_ratio);
+    return config;
+}
+
+static gsc_risk_config_t apply_runtime_config_to_risk(gsc_risk_config_t risk, gsc_runtime_config_t config) {
+    if (config.max_margin_ratio > 0.0) risk.max_margin_ratio = config.max_margin_ratio;
+    if (config.min_lot_haircut_ratio > 0.0) risk.min_lot_haircut_ratio = config.min_lot_haircut_ratio;
+    if (config.max_concurrent_positions > 0) risk.max_concurrent_positions = config.max_concurrent_positions;
+    if (config.max_drawdown > 0.0) risk.max_drawdown = config.max_drawdown;
+    if (config.switch_buffer > 0.0) risk.switch_buffer = config.switch_buffer;
+    if (config.min_leverage > 0.0) risk.min_leverage = config.min_leverage;
+    if (config.max_leverage > 0.0) risk.max_leverage = config.max_leverage;
+    risk.profit_withdraw_ratio = config.profit_withdraw_ratio;
+    return normalize_risk_config(risk);
+}
+
 static void copy_text(char *dst, size_t dst_len, const char *src) {
     if (!dst || dst_len == 0) return;
     if (!src) src = "";
@@ -134,6 +186,12 @@ int gsc_client_subscribe(gsc_client_t *client, const char *venue, const char *in
 }
 
 int gsc_client_subscribe_basket(gsc_client_t *client, const char *venue, const char **instruments, size_t instrument_count, double profit_withdraw_ratio) {
+    gsc_risk_config_t risk = gsc_default_risk_config();
+    return gsc_client_subscribe_basket_with_risk(client, venue, instruments, instrument_count, &risk, profit_withdraw_ratio);
+}
+
+int gsc_client_subscribe_basket_with_risk(gsc_client_t *client, const char *venue, const char **instruments, size_t instrument_count, const gsc_risk_config_t *risk, double profit_withdraw_ratio) {
+    gsc_risk_config_t normalized = normalize_risk_config(risk ? *risk : gsc_default_risk_config());
     char json[4096];
     int n = snprintf(json, sizeof json, "{\"type\":\"subscribe\",\"venue\":\"%s\",\"instruments\":[", venue ? venue : "");
     if (n < 0 || (size_t)n >= sizeof json) return -1;
@@ -142,7 +200,9 @@ int gsc_client_subscribe_basket(gsc_client_t *client, const char *venue, const c
         if (wrote < 0 || (size_t)wrote >= sizeof json - (size_t)n) return -1;
         n += wrote;
     }
-    int wrote = snprintf(json + n, sizeof json - (size_t)n, "],\"profitWithdrawRatio\":%.17g}", profit_withdraw_ratio);
+    int wrote = snprintf(json + n, sizeof json - (size_t)n,
+        "],\"risk\":{\"maxMarginRatio\":%.17g,\"minLotHaircutRatio\":%.17g,\"maxConcurrentPositions\":%d,\"maxDrawdown\":%.17g,\"switchBuffer\":%.17g,\"minLeverage\":%.17g,\"maxLeverage\":%.17g,\"profitWithdrawRatio\":%.17g},\"profitWithdrawRatio\":%.17g}",
+        normalized.max_margin_ratio, normalized.min_lot_haircut_ratio, normalized.max_concurrent_positions, normalized.max_drawdown, normalized.switch_buffer, normalized.min_leverage, normalized.max_leverage, normalized.profit_withdraw_ratio, clamp01(profit_withdraw_ratio));
     if (wrote < 0 || (size_t)wrote >= sizeof json - (size_t)n) return -1;
     n += wrote;
     return client && client->send ? client->send(client->user, json, (size_t)n) : -1;
@@ -184,8 +244,16 @@ int gsc_client_remove_instrument(gsc_client_t *client, long subscription_id, con
 }
 
 int gsc_client_update_config(gsc_client_t *client, long subscription_id, double profit_withdraw_ratio) {
-    char json[256];
-    int n = snprintf(json, sizeof json, "{\"type\":\"update-config\",\"subscriptionId\":%ld,\"profitWithdrawRatio\":%.17g}", subscription_id, clamp01(profit_withdraw_ratio));
+    gsc_runtime_config_t config = gsc_runtime_config_from_profit_withdraw_ratio(profit_withdraw_ratio);
+    return gsc_client_update_runtime_config(client, subscription_id, &config);
+}
+
+int gsc_client_update_runtime_config(gsc_client_t *client, long subscription_id, const gsc_runtime_config_t *config) {
+    gsc_runtime_config_t normalized = normalize_runtime_config(config ? *config : gsc_runtime_config_from_profit_withdraw_ratio(0.0));
+    char json[512];
+    int n = snprintf(json, sizeof json,
+        "{\"type\":\"update-config\",\"subscriptionId\":%ld,\"maxMarginRatio\":%.17g,\"minLotHaircutRatio\":%.17g,\"maxConcurrentPositions\":%d,\"maxDrawdown\":%.17g,\"switchBuffer\":%.17g,\"minLeverage\":%.17g,\"maxLeverage\":%.17g,\"profitWithdrawRatio\":%.17g}",
+        subscription_id, normalized.max_margin_ratio, normalized.min_lot_haircut_ratio, normalized.max_concurrent_positions, normalized.max_drawdown, normalized.switch_buffer, normalized.min_leverage, normalized.max_leverage, normalized.profit_withdraw_ratio);
     return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
 }
 
@@ -300,6 +368,7 @@ void gsc_signals_manager_init(gsc_signals_manager_t *manager, gsc_client_t *clie
     memset(manager, 0, sizeof *manager);
     manager->client = client;
     copy_lower(manager->config.venue, sizeof manager->config.venue, config && config->venue[0] ? config->venue : "okx");
+    manager->config.risk = normalize_risk_config(config ? config->risk : gsc_default_risk_config());
     manager->config.profit_withdraw_ratio = clamp01(config ? config->profit_withdraw_ratio : 0.0);
     if (config) {
         for (size_t i = 0; i < config->instrument_count && i < GSC_MAX_INSTRUMENTS; i++) {
@@ -316,7 +385,7 @@ int gsc_signals_manager_subscribe(gsc_signals_manager_t *manager) {
     if (!manager) return -1;
     const char *instruments[GSC_MAX_INSTRUMENTS];
     for (size_t i = 0; i < manager->config.instrument_count; i++) instruments[i] = manager->config.instruments[i];
-    return gsc_client_subscribe_basket(manager->client, manager->config.venue, instruments, manager->config.instrument_count, manager->config.profit_withdraw_ratio);
+    return gsc_client_subscribe_basket_with_risk(manager->client, manager->config.venue, instruments, manager->config.instrument_count, &manager->config.risk, manager->config.profit_withdraw_ratio);
 }
 
 int gsc_signals_manager_handle_event(gsc_signals_manager_t *manager, const gsc_event_t *event) {
@@ -424,9 +493,16 @@ int gsc_signals_manager_remove_instrument(gsc_signals_manager_t *manager, const 
 }
 
 int gsc_signals_manager_update_config(gsc_signals_manager_t *manager, double profit_withdraw_ratio) {
+    gsc_runtime_config_t config = gsc_runtime_config_from_profit_withdraw_ratio(profit_withdraw_ratio);
+    return gsc_signals_manager_update_runtime_config(manager, &config);
+}
+
+int gsc_signals_manager_update_runtime_config(gsc_signals_manager_t *manager, const gsc_runtime_config_t *config) {
     if (!manager) return -1;
-    manager->config.profit_withdraw_ratio = clamp01(profit_withdraw_ratio);
-    if (manager->subscription_id > 0) return gsc_client_update_config(manager->client, manager->subscription_id, manager->config.profit_withdraw_ratio);
+    gsc_runtime_config_t normalized = normalize_runtime_config(config ? *config : gsc_runtime_config_from_profit_withdraw_ratio(0.0));
+    manager->config.risk = apply_runtime_config_to_risk(manager->config.risk, normalized);
+    manager->config.profit_withdraw_ratio = normalized.profit_withdraw_ratio;
+    if (manager->subscription_id > 0) return gsc_client_update_runtime_config(manager->client, manager->subscription_id, &normalized);
     return 0;
 }
 
