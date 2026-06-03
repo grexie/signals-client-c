@@ -166,8 +166,8 @@ int gsc_client_update_position(gsc_client_t *client, long subscription_id, const
     if (!position) return -1;
     gsc_side_t side = gsc_position_side(position);
     char json[1536];
-    int n = snprintf(json, sizeof json, "{\"type\":\"update-position\",\"subscriptionId\":%ld,\"venue\":\"%s\",\"instrument\":\"%s\",\"side\":\"%s\",\"status\":\"%s\",\"size\":%.17g,\"confidence\":%.17g,\"entryPrice\":%.17g,\"markPrice\":%.17g,\"takeProfit\":%.17g,\"stopLoss\":%.17g,\"takeProfitPrice\":%.17g,\"stopLossPrice\":%.17g,\"leverage\":%.17g}",
-        subscription_id, position->venue, position->instrument, side_text(side), position->status, fabs(position->size), position->confidence, position->entry_price, position->last_price, position->take_profit, position->stop_loss, position->take_profit_price, position->stop_loss_price, position->leverage);
+    int n = snprintf(json, sizeof json, "{\"type\":\"update-position\",\"subscriptionId\":%ld,\"venue\":\"%s\",\"instrument\":\"%s\",\"side\":\"%s\",\"status\":\"%s\",\"size\":%.17g,\"confidence\":%.17g,\"entryPrice\":%.17g,\"markPrice\":%.17g,\"takeProfit\":%.17g,\"stopLoss\":%.17g,\"takeProfitPrice\":%.17g,\"stopLossPrice\":%.17g,\"margin\":%.17g,\"leverage\":%.17g}",
+        subscription_id, position->venue, position->instrument, side_text(side), position->status, fabs(position->size), position->confidence, position->entry_price, position->last_price, position->take_profit, position->stop_loss, position->take_profit_price, position->stop_loss_price, position->margin, position->leverage);
     return client && client->send && n > 0 && (size_t)n < sizeof json ? client->send(client->user, json, (size_t)n) : -1;
 }
 
@@ -223,7 +223,9 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
     event->side = parse_side(side);
     event->replay = json_get_bool(json, "replay");
     event->contract_size = json_get_double(json, "contractSize", 0.0);
+    event->margin = json_get_double(json, "margin", 0.0);
     event->leverage = json_get_double(json, "leverage", 0.0);
+    event->confidence = json_get_double(json, "confidence", 0.0);
     event->reduce_only = json_get_bool(json, "reduceOnly");
     event->take_profit = json_get_double(json, "takeProfit", 0.0);
     event->stop_loss = json_get_double(json, "stopLoss", 0.0);

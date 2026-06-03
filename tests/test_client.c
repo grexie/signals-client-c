@@ -52,7 +52,7 @@ static void test_parse_info_and_error(void) {
 
 static void test_parse_router_events(void) {
     gsc_event_t event;
-    int rc = gsc_parse_event("{\"type\":\"create-market-order\",\"subscriptionId\":7,\"intentId\":\"intent_1\",\"reason\":\"preempted_by_better_route\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"action\":\"enter\",\"side\":\"buy\",\"contractSize\":2,\"leverage\":3,\"reduceOnly\":true,\"takeProfitPrice\":105.5,\"stopLossPrice\":97.2,\"takeProfit\":0.055,\"stopLoss\":0.028}", &event);
+    int rc = gsc_parse_event("{\"type\":\"create-market-order\",\"subscriptionId\":7,\"intentId\":\"intent_1\",\"reason\":\"preempted_by_better_route\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"action\":\"enter\",\"side\":\"buy\",\"contractSize\":2,\"margin\":125.5,\"leverage\":3,\"confidence\":0.73,\"reduceOnly\":true,\"takeProfitPrice\":105.5,\"stopLossPrice\":97.2,\"takeProfit\":0.055,\"stopLoss\":0.028}", &event);
     assert(rc == 0);
     assert(event.type == GSC_EVENT_CREATE_MARKET_ORDER);
     assert(event.subscription_id == 7);
@@ -60,6 +60,9 @@ static void test_parse_router_events(void) {
     assert(strcmp(event.reason, "preempted_by_better_route") == 0);
     assert(event.side == GSC_SIDE_BUY);
     assert(fabs(event.contract_size - 2.0) < 1e-9);
+    assert(fabs(event.margin - 125.5) < 1e-9);
+    assert(fabs(event.leverage - 3.0) < 1e-9);
+    assert(fabs(event.confidence - 0.73) < 1e-9);
     assert(event.reduce_only == 1);
 
     rc = gsc_parse_event("{\"type\":\"update-tpsl\",\"subscriptionId\":7,\"intentId\":\"tpsl_1\",\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"side\":\"sell\",\"takeProfitPrice\":101.5,\"stopLossPrice\":99.2,\"takeProfit\":0.02,\"stopLoss\":0.01}", &event);

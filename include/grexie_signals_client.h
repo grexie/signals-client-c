@@ -84,7 +84,9 @@ typedef struct {
     int replay;
     gsc_side_t side;
     double contract_size;
+    double margin;
     double leverage;
+    double confidence;
     int reduce_only;
     double take_profit;
     double stop_loss;
@@ -129,6 +131,7 @@ typedef struct {
     double trailing_stop_activation;
     double trailing_stop_distance;
     double trailing_stop_min_profit;
+    double margin;
     double leverage;
     double mfe;
     double mae;
