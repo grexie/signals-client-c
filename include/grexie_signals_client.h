@@ -66,6 +66,7 @@ typedef struct {
     char artifact_id[GSC_MAX_TEXT];
     char artifact_version[GSC_MAX_TEXT];
     char rejected_reason[GSC_MAX_TEXT];
+    int manage_positions_only;
     double price;
 } gsc_signal_t;
 

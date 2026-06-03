@@ -256,6 +256,27 @@ int gsc_parse_event(const char *json, gsc_event_t *event) {
         event->signal.trailing_stop_distance = json_get_double(json, "trailingStopDistance", 0.0);
         event->signal.trailing_stop_min_profit = json_get_double(json, "trailingStopMinProfit", 0.0);
         event->signal.score = json_get_double(json, "score", 0.0);
+        json_get_string(json, "modelVariant", event->signal.model_variant, sizeof event->signal.model_variant);
+        json_get_string(json, "modelVersion", event->signal.model_version, sizeof event->signal.model_version);
+        json_get_string(json, "predictionMode", event->signal.prediction_mode, sizeof event->signal.prediction_mode);
+        json_get_string(json, "confidenceMapping", event->signal.confidence_mapping, sizeof event->signal.confidence_mapping);
+        event->signal.up_probability = json_get_double(json, "upProbability", 0.0);
+        event->signal.down_probability = json_get_double(json, "downProbability", 0.0);
+        event->signal.directional_edge = json_get_double(json, "directionalEdge", 0.0);
+        event->signal.normalized_edge = json_get_double(json, "normalizedEdge", 0.0);
+        event->signal.expected_value = json_get_double(json, "expectedValue", 0.0);
+        json_get_string(json, "regime", event->signal.regime, sizeof event->signal.regime);
+        event->signal.regime_confidence = json_get_double(json, "regimeConfidence", 0.0);
+        json_get_string(json, "volatilityState", event->signal.volatility_state, sizeof event->signal.volatility_state);
+        json_get_string(json, "squeezeState", event->signal.squeeze_state, sizeof event->signal.squeeze_state);
+        json_get_string(json, "trendState", event->signal.trend_state, sizeof event->signal.trend_state);
+        event->signal.atr_percent = json_get_double(json, "atrPercent", 0.0);
+        event->signal.signal_ttl = json_get_double(json, "signalTTL", 0.0);
+        json_get_string(json, "generatedAt", event->signal.generated_at, sizeof event->signal.generated_at);
+        json_get_string(json, "artifactID", event->signal.artifact_id, sizeof event->signal.artifact_id);
+        json_get_string(json, "artifactVersion", event->signal.artifact_version, sizeof event->signal.artifact_version);
+        json_get_string(json, "rejectedReason", event->signal.rejected_reason, sizeof event->signal.rejected_reason);
+        event->signal.manage_positions_only = json_get_bool(json, "managePositionsOnly");
         event->signal.price = json_get_double(json, "price", 0.0);
         event->signal.side = event->side;
     }

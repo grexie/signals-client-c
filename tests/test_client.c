@@ -20,7 +20,7 @@ static int capture_send(void *user, const char *text, size_t len) {
 
 static void test_parse_signal(void) {
     gsc_event_t event;
-    int rc = gsc_parse_event("{\"type\":\"signal\",\"subscriptionId\":2,\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"replay\":true,\"signal\":{\"confidence\":0.8,\"side\":\"buy\",\"takeProfit\":0.01,\"stopLoss\":0.004,\"trailingStopActivation\":0.02,\"trailingStopDistance\":0.01,\"trailingStopMinProfit\":0.001}}", &event);
+    int rc = gsc_parse_event("{\"type\":\"signal\",\"subscriptionId\":2,\"venue\":\"okx\",\"instrument\":\"BTC-USDT-SWAP\",\"replay\":true,\"signal\":{\"confidence\":0.8,\"side\":\"buy\",\"takeProfit\":0.01,\"stopLoss\":0.004,\"trailingStopActivation\":0.02,\"trailingStopDistance\":0.01,\"trailingStopMinProfit\":0.001,\"managePositionsOnly\":true}}", &event);
     assert(rc == 0);
     assert(event.type == GSC_EVENT_SIGNAL);
     assert(event.subscription_id == 2);
@@ -28,6 +28,9 @@ static void test_parse_signal(void) {
     assert(strcmp(event.signal.instrument, "BTC-USDT-SWAP") == 0);
     assert(event.signal.side == GSC_SIDE_BUY);
     assert(fabs(event.signal.trailing_stop_activation - 0.02) < 1e-9);
+    assert(fabs(event.signal.trailing_stop_distance - 0.01) < 1e-9);
+    assert(fabs(event.signal.trailing_stop_min_profit - 0.001) < 1e-9);
+    assert(event.signal.manage_positions_only == 1);
     assert(event.replay == 1);
 }
 
